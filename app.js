@@ -420,7 +420,20 @@ async function downloadVendorCatalog(vendor, onProgress) {
       await new Promise(r => setTimeout(r, 1200 * attempt));
     }
   }
-  return { products: got.products, clients: got.clients, discounts: got.discounts, cabysMap, maestros };
+  // Fotos de la hoja Imagenes (mismo GS): también son parte de la ruta
+  let images = null;
+  if (onProgress) onProgress("fotos", 1);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch(`${state.sheetsUrl}?action=get_images`);
+      const json = await res.json();
+      if (json.status === "success" && json.images) { images = json.images; break; }
+    } catch (e) {
+      if (attempt === 2) console.warn("fotos ruta:", e);
+      await new Promise(r => setTimeout(r, 1200 * attempt));
+    }
+  }
+  return { products: got.products, clients: got.clients, discounts: got.discounts, cabysMap, maestros, images };
 }
 
 function getVendorCache(vendor) {
@@ -439,6 +452,10 @@ function applyVendorCatalog(cat) {
   state.clients = cat.clients || [];
   state.discounts = cat.discounts || [];
   state.cabysMap = cat.cabysMap || {};
+  if (cat.images && Object.keys(cat.images).length) {
+    state.images = { ...(state.images || {}), ...cat.images };
+    try { localStorage.setItem('ecomdx_images', JSON.stringify(state.images)); } catch (e) {}
+  }
   if (cat.maestros && (Object.keys(cat.maestros.proveedores || {}).length || Object.keys(cat.maestros.categorias || {}).length)) {
     state.maestros = {
       proveedores: cat.maestros.proveedores || {},
@@ -583,7 +600,7 @@ async function confirmDownloadRoute() {
   if (re) re.classList.add('hidden');
   try {
     state.vendedor = { ...state.pendingVendor };
-    const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros" };
+    const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
     applyVendorCatalog(await downloadVendorCatalog(state.vendedor.codigo, (t) => {
       if (btn) btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i><span>Descargando ${names[t] || t}...</span>`;
     }));
@@ -1247,7 +1264,7 @@ async function reloadCatalogData() {
       showDlToast("Descargando información de tu ruta...", true, true);
       try {
         applyVendorCatalog(await downloadVendorCatalog(state.vendedor.codigo, (t) => {
-          const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros" };
+          const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
           showDlToast(`Descargando ${names[t] || t}...`, true, true);
         }));
         await loadMaestros();
