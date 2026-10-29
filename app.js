@@ -408,10 +408,24 @@ async function downloadVendorCatalog(vendor, onProgress) {
         await new Promise(r => setTimeout(r, 1200 * attempt));
       }
     }
-    if (lastErr) throw new Error(`${t}: ${lastErr.message}`);
+    if (lastErr) {
+      if (t === "cabys") {
+        console.warn(`[downloadVendorCatalog] CABYS no disponible en vivo (${lastErr.message}), usando respaldo.`);
+        try {
+          got["cabys"] = await fetchVendorType("cabys", "3");
+        } catch (e2) {
+          got["cabys"] = Object.values(state.cabysMap || {});
+        }
+      } else if (t === "discounts") {
+        console.warn(`[downloadVendorCatalog] Descuentos no disponible en vivo (${lastErr.message}), usando respaldo.`);
+        got["discounts"] = state.discounts || [];
+      } else {
+        throw new Error(`${t}: ${lastErr.message}`);
+      }
+    }
   }
   const cabysMap = {};
-  got.cabys.forEach(c => { if (c && c.pro_codecom) cabysMap[String(c.pro_codecom).trim()] = c; });
+  (got.cabys || []).forEach(c => { if (c && c.pro_codecom) cabysMap[String(c.pro_codecom).trim()] = c; });
   // Maestros de proveedor y categorías junto con la ruta (para chips y nombres offline)
   let maestros = null;
   if (onProgress) onProgress("maestros", 1);
