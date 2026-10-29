@@ -1,9 +1,9 @@
 /**
  * Distribuciones Castro Preventa - Service Worker for 100% Offline App
  * Modo Offline Total: Shell + datos + CDNs + fotos vistas en caché local.
- * Carga instantánea sin esperas de red en cada apertura.
+ * Carga instantánea y siempre actualizada al tener red.
  */
-const CACHE_NAME = 'castro-preventa-v3.0';
+const CACHE_NAME = 'castro-preventa-v4.0';
 const ASSETS_TO_CACHE = [
   './index.html',
   './styles.css',
@@ -32,6 +32,7 @@ self.addEventListener('activate', (event) => {
       return Promise.all(
         keys.map((key) => {
           if (key !== CACHE_NAME) {
+            console.log('[SW] Purgando caché obsoleta:', key);
             return caches.delete(key);
           }
         })
@@ -46,7 +47,7 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(req.url);
 
-  // Fotos de productos: cache-first
+  // 1. Fotos de productos: Cache-first para ahorrar datos móviles
   if (req.destination === 'image') {
     event.respondWith(
       caches.match(req).then((hit) => {
@@ -63,7 +64,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // CDNs externos (Tailwind, FontAwesome, Fuentes): Cache-first
+  // 2. CDNs externos (Tailwind, FontAwesome, Fuentes): Cache-first
   if (url.origin.includes('cdn.tailwindcss.com') ||
       url.origin.includes('cdnjs.cloudflare.com') ||
       url.origin.includes('fonts.googleapis.com') ||
@@ -83,29 +84,28 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Navegación, scripts locales y estilos: Cache-first con actualización en background
+  // 3. Peticiones a Google Script o APIs: NO pasar por Service Worker (que vaya directo a la red)
+  if (url.origin.includes('script.google.com') || url.origin.includes('google.com')) {
+    return;
+  }
+
+  // 4. Archivos locales de la app (HTML, JS, CSS): Network-first con fallback a caché
+  // Esto garantiza que tras cambios y recargas (F5 / CTRL+F5) siempre se obtenga la versión más reciente si hay red,
+  // y si no hay red (offline total), cargue sin problemas desde la caché.
   event.respondWith(
-    caches.match(req).then((cached) => {
-      if (cached) {
-        // En background actualizamos el asset si hay red sin demorar la app
-        fetch(req).then((netRes) => {
-          if (netRes && netRes.status === 200) {
-            caches.open(CACHE_NAME).then((cache) => cache.put(req, netRes));
-          }
-        }).catch(() => {});
-        return cached;
+    fetch(req).then((netRes) => {
+      if (netRes && netRes.status === 200) {
+        const copy = netRes.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
       }
-      return fetch(req).then((netRes) => {
-        if (netRes && netRes.status === 200) {
-          const copy = netRes.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
-        }
-        return netRes;
-      }).catch(() => {
+      return netRes;
+    }).catch(() => {
+      return caches.match(req, { ignoreSearch: true }).then((cached) => {
+        if (cached) return cached;
         if (req.mode === 'navigate') {
           return caches.match('./index.html');
         }
-        return caches.match(req, { ignoreSearch: true });
+        return null;
       });
     })
   );

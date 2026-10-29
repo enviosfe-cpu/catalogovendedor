@@ -2,6 +2,8 @@
  * Distribuciones Castro Preventa - Main Application Engine
  */
 
+const DEFAULT_SHEETS_URL = "https://script.google.com/macros/s/AKfycbzgitAKy2x0rodDbi66u0njHy4M-mn-3g9pQXizkBGbGquDtauwaabr3ruMN2UiXF4X8g/exec";
+
 // Global State
 let state = {
   products: [],
@@ -15,7 +17,9 @@ let state = {
   vendedor: null,
   pendingVendor: null,
   selectedSupplier: 'ALL',
-  sheetsUrl: "",
+  sheetsUrl: (function() {
+    try { return localStorage.getItem('ecomdx_sheets_url') || DEFAULT_SHEETS_URL; } catch (e) { return DEFAULT_SHEETS_URL; }
+  })(),
   currentClient: null,
   selectedCategory: 'ALL',
   searchQuery: '',
@@ -66,7 +70,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 function initPWA() {
   if ('serviceWorker' in navigator && (window.location.protocol === 'http:' || window.location.protocol === 'https:')) {
     navigator.serviceWorker.register('./sw.js')
-      .then(() => console.log('Service Worker registrado correctamente para modo offline.'))
+      .then((reg) => {
+        console.log('Service Worker registrado correctamente para modo offline.');
+        if (reg) reg.update().catch(() => {});
+      })
       .catch((e) => console.log('Service Worker error:', e));
   }
 
@@ -335,13 +342,40 @@ function requireLogin() {
   if (s && s.codigo) {
     state.vendedor = s;
     showAppForSeller();
-    // Sin descargas automáticas: usa la ruta guardada o el paquete base
-    restoreVendorCache();
+    const hasData = restoreVendorCache();
+    // Detección automática: si no hay productos (o caché vacía tras Ctrl+F5) y hay internet, descargar de inmediato
+    if ((!hasData || !state.products || state.products.length === 0) && navigator.onLine) {
+      autoSyncVendorCatalog();
+    }
   } else {
     state.vendedor = null;
     document.getElementById('login-overlay')?.classList.remove('hidden');
     // Primera vez sin URL: abrir Configuración para pegarla
     if (!state.sheetsUrl) openConfigModal();
+  }
+}
+
+async function autoSyncVendorCatalog() {
+  if (!state.vendedor || !state.vendedor.codigo) return;
+  if (!navigator.onLine) {
+    showDlToast("Sin conexión: no hay datos guardados en este equipo.", false, false);
+    return;
+  }
+  if (!state.sheetsUrl) state.sheetsUrl = DEFAULT_SHEETS_URL;
+
+  console.log(`[AutoSync] Catálogo vacío para vendedor ${state.vendedor.codigo}. Iniciando descarga automática...`);
+  showDlToast("Detectando ruta... Descargando catálogo...", true, true);
+  try {
+    const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
+    const cat = await downloadVendorCatalog(state.vendedor.codigo, (t) => {
+      showDlToast(`Descargando ${names[t] || t}...`, true, true);
+    });
+    applyVendorCatalog(cat);
+    await loadMaestros();
+    showDlToast("Catálogo listo y actualizado", false, false);
+  } catch (err) {
+    console.warn("[AutoSync] Error en descarga automática:", err);
+    showDlToast("No se pudo descargar automáticamente. Pulsa 'Actualizar ruta'.", false, false);
   }
 }
 
@@ -446,13 +480,15 @@ async function downloadVendorCatalog(vendor, onProgress) {
       if (t === "cabys") {
         console.warn(`[downloadVendorCatalog] CABYS no disponible en Sheet (${lastErr.message}), usando respaldo.`);
         try {
-          got["cabys"] = await fetchVendorType("cabys", "3");
+          got["cabys"] = await fetchVendorType("cabys", "");
         } catch (e2) {
           got["cabys"] = Object.values(state.cabysMap || {});
         }
+        lastErr = null;
       } else if (t === "discounts") {
         console.warn(`[downloadVendorCatalog] Descuentos no disponible en Sheet (${lastErr.message}), usando respaldo.`);
         got["discounts"] = state.discounts || [];
+        lastErr = null;
       } else {
         throw new Error(`${t}: ${lastErr.message}`);
       }
@@ -639,18 +675,26 @@ function showRouteChoice() {
     name.textContent = `${state.pendingVendor.nombre || ''} (${state.pendingVendor.codigo})`.trim();
   }
   const info = document.getElementById('login-cache-info');
+  let hasLocal = false;
   if (info && state.pendingVendor) {
     let cacheTs = null;
     try {
       const raw = localStorage.getItem('ecomdx_vendor_catalog');
       if (raw) {
         const j = JSON.parse(raw);
-        if (j && String(j.vendor || "").toUpperCase() === String(state.pendingVendor.codigo || "").toUpperCase()) cacheTs = j.ts;
+        if (j && String(j.vendor || "").toUpperCase() === String(state.pendingVendor.codigo || "").toUpperCase() && Array.isArray(j.products) && j.products.length > 0) {
+          cacheTs = j.ts;
+          hasLocal = true;
+        }
       }
     } catch (e) {}
     info.textContent = cacheTs
       ? `Tienes datos guardados (${new Date(cacheTs).toLocaleString()}). Puedes usarlos sin descargar.`
-      : `Aún no tienes datos guardados en este equipo: debes actualizar tu ruta.`;
+      : `Aún no tienes datos guardados en este equipo: descargando tu ruta automáticamente...`;
+  }
+  // Si no tiene datos en este equipo y tiene conexión, iniciar descarga de ruta automáticamente
+  if (!hasLocal && navigator.onLine) {
+    confirmDownloadRoute();
   }
 }
 
