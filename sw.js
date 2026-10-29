@@ -3,11 +3,13 @@
  * Modo Offline Total: Shell + datos + CDNs + fotos vistas en caché local.
  * Carga instantánea y siempre actualizada al tener red.
  */
-const CACHE_NAME = 'castro-preventa-v4.0';
+const CACHE_NAME = 'castro-preventa-v5.9';
 const ASSETS_TO_CACHE = [
   './index.html',
-  './styles.css',
-  './app.js',
+  './styles.css?v=5.9',
+  './html5-qrcode.min.js',
+  './bundle_data.js?v=5.9',
+  './app.js?v=5.9',
   './manifest.json',
   './logo.png',
   './icon-192.png',

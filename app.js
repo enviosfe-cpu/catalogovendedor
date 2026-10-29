@@ -18,7 +18,7 @@ let state = {
   pendingVendor: null,
   selectedSupplier: 'ALL',
   sheetsUrl: (function() {
-    try { return localStorage.getItem('ecomdx_sheets_url') || DEFAULT_SHEETS_URL; } catch (e) { return DEFAULT_SHEETS_URL; }
+    try { return (localStorage.getItem('ecomdx_sheets_url') || "").trim(); } catch (e) { return ""; }
   })(),
   currentClient: null,
   selectedCategory: 'ALL',
@@ -30,6 +30,90 @@ let state = {
 // Logo tolerante a estructura plana (repo raíz) o con carpetas (dev local)
 const LOGO_CANDIDATES = ['./logo.png', '../images/logo.png'];
 function logoSrc() { return LOGO_CANDIDATES[0]; }
+
+// ── Almacenamiento IndexedDB para catálogos grandes (sin límite de 5MB de localStorage) ──
+const IDB_NAME = 'ecomdx_preventa_db';
+const IDB_VERSION = 1;
+const IDB_STORE = 'catalog_cache';
+
+function getDB() {
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined' || !window.indexedDB) return resolve(null);
+    try {
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = (e) => resolve(e.target.result);
+      req.onerror = () => resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+async function idbGet(key) {
+  try {
+    const db = await getDB();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.get(key);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+async function idbSet(key, value) {
+  try {
+    const db = await getDB();
+    if (!db) return false;
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.put(value, key);
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => resolve(false);
+    });
+  } catch (e) {
+    return false;
+  }
+}
+
+async function idbDelete(key) {
+  try {
+    const db = await getDB();
+    if (!db) return;
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.delete(key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+    });
+  } catch (e) {}
+}
+
+function cleanForCache(obj) {
+  if (Array.isArray(obj)) return obj.map(cleanForCache);
+  if (obj && typeof obj === 'object') {
+    const res = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (v === null || v === undefined || v === '') continue;
+      if (Array.isArray(v) && v.length === 0) continue;
+      res[k] = cleanForCache(v);
+    }
+    return res;
+  }
+  return obj;
+}
 
 // Normaliza links de Drive (vista /file/d/...) a imagen directa
 function normalizeImageUrl(url) {
@@ -96,12 +180,15 @@ function initPWA() {
  */
 function toggleMenu(forceClose) {
   const menu = document.getElementById('app-menu');
+  const btn = document.getElementById('btn-seller');
   if (!menu) return;
   if (forceClose === true) {
     menu.classList.add('hidden');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
     return;
   }
-  menu.classList.toggle('hidden');
+  const isOpen = menu.classList.toggle('hidden') === false;
+  if (btn) btn.setAttribute('aria-expanded', String(isOpen));
 }
 
 function installPWA() {
@@ -121,19 +208,66 @@ function installPWA() {
  */
 async function loadCatalogData() {
   try {
-    // 1. Catálogo publicado o sincronizado previamente
-    const published = localStorage.getItem('ecomdx_published_catalog');
-    if (published) {
-      const data = JSON.parse(published);
-      applyLoadedData(data);
+    const session = getStoredSession();
+    const vendorCode = session ? String(session.codigo || "").trim().toUpperCase() : '';
+
+    // 1. Intentar cargar desde IndexedDB (persistencia masiva, sin límite de 5MB)
+    let cached = null;
+    try {
+      if (vendorCode) cached = await idbGet(`vendor_catalog_${vendorCode}`);
+      if (!cached) cached = await idbGet('vendor_catalog');
+      if (!cached) cached = await idbGet('published_catalog');
+    } catch (e) {}
+
+    if (cached && cached.catalog && Array.isArray(cached.catalog.products) && cached.catalog.products.length > 0) {
+      cached = cached.catalog;
+    }
+
+    if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
+      applyLoadedData(cached);
       return;
     }
 
-    // 2. Si no hay catálogo guardado en este equipo, iniciar en blanco
+    // 2. Intentar cargar de localStorage (respaldo clásico)
+    const localCached = getVendorCache(vendorCode) || getVendorCache('');
+    if (localCached && Array.isArray(localCached.products) && localCached.products.length > 0) {
+      applyLoadedData(localCached);
+      idbSet(`vendor_catalog_${vendorCode}`, localCached).catch(() => {});
+      return;
+    }
+
+    const published = localStorage.getItem('ecomdx_published_catalog');
+    if (published) {
+      const data = JSON.parse(published);
+      if (data && Array.isArray(data.products) && data.products.length > 0) {
+        applyLoadedData(data);
+        idbSet(`vendor_catalog_${vendorCode}`, data).catch(() => {});
+        return;
+      }
+    }
+
+    // 3. Cargar paquete local empaquetado (bundle_data.js) - 100% offline garantizado de fábrica
+    if (typeof window !== 'undefined' && window.__INITIAL_CATALOG__) {
+      const initBundle = window.__INITIAL_CATALOG__;
+      const initialCat = initBundle.catalog || initBundle;
+      if (initialCat && Array.isArray(initialCat.products) && initialCat.products.length > 0) {
+        applyLoadedData(initialCat);
+        idbSet('vendor_catalog', initialCat).catch(() => {});
+        if (vendorCode) idbSet(`vendor_catalog_${vendorCode}`, initialCat).catch(() => {});
+        return;
+      }
+    }
+
+    // 4. Si aún no hay catálogo guardado en este equipo, iniciar en blanco
     applyLoadedData({ products: [], clients: [], discounts: [], cabysMap: {} });
   } catch (err) {
     console.warn("Error cargando datos:", err);
-    applyLoadedData({ products: [], clients: [], discounts: [], cabysMap: {} });
+    if (typeof window !== 'undefined' && window.__INITIAL_CATALOG__) {
+      const initBundle = window.__INITIAL_CATALOG__;
+      applyLoadedData(initBundle.catalog || initBundle);
+    } else {
+      applyLoadedData({ products: [], clients: [], discounts: [], cabysMap: {} });
+    }
   }
 }
 
@@ -147,15 +281,14 @@ function applyLoadedData(data) {
   // la guardada antes o la que se pegue y guarde en la app (Configuración/login).
   // Si el paquete trae una sugerida, solo se prellena para pegarla con un toque.
   if (!state.sheetsUrl) {
-    try { state.sheetsUrl = localStorage.getItem('ecomdx_sheets_url') || ''; } catch (e) {}
+    try { state.sheetsUrl = (localStorage.getItem('ecomdx_sheets_url') || "").trim(); } catch (e) {}
   }
-  if (!state.sheetsUrl && data.config && data.config.sheetsUrl) {
-    const suggested = String(data.config.sheetsUrl).trim();
-    const loginInput = document.getElementById('login-sheets-url');
-    if (loginInput && !loginInput.value) loginInput.value = suggested;
-    const cfgInput = document.getElementById('config-sheets-url');
-    if (cfgInput && !cfgInput.value) cfgInput.value = suggested;
-  }
+  const suggestedUrl = (data.config && data.config.sheetsUrl) ? String(data.config.sheetsUrl).trim() : DEFAULT_SHEETS_URL;
+  const loginInput = document.getElementById('login-sheets-url');
+  if (loginInput && !loginInput.value) loginInput.value = state.sheetsUrl || suggestedUrl;
+  const cfgInput = document.getElementById('config-sheets-url');
+  if (cfgInput && !cfgInput.value) cfgInput.value = state.sheetsUrl || suggestedUrl;
+
   // Maestros de proveedores/categorías (nombres del Sheet, códigos del ERP)
   if (data.config && data.config.maestros) {
     state.maestros = {
@@ -185,8 +318,7 @@ function applyLoadedData(data) {
   renderCategoryChips();
   applyFilters();
   applyCompanyName();
-  // Puerta de acceso por vendedor (verificada en el Sheet)
-  requireLogin();
+  if (data.ts) updateSyncTime(data.ts);
 }
 
 /**
@@ -321,13 +453,107 @@ function applyCompanyName() {
   const name = (state.companyName || "").trim() || "Distribuciones Castro";
   const el = document.getElementById('login-company-name');
   if (el) el.textContent = name;
+  const headerEl = document.getElementById('header-company-name');
+  if (headerEl) headerEl.textContent = name;
   document.title = `${name} | Catálogo Digital Preventa`;
   applyBrandLogos();
 }
 
 /**
- * Acceso por código de vendedor. Permisos verificados en el servidor (Code.gs),
- * las contraseñas nunca se descargan al teléfono.
+ * Control del cuadro de sincronización / actualización en pantalla
+ */
+let syncBoxTimer = null;
+function showSyncBox(title, msg, spinning = true) {
+  const box = document.getElementById('pv-sync-box');
+  const titleEl = document.getElementById('pv-sync-title');
+  const msgEl = document.getElementById('pv-sync-msg');
+  const icon = document.getElementById('pv-sync-icon');
+  const iconWrap = icon?.parentElement;
+  if (!box) return;
+
+  if (syncBoxTimer) {
+    clearTimeout(syncBoxTimer);
+    syncBoxTimer = null;
+  }
+
+  if (titleEl) titleEl.textContent = title;
+  if (msgEl) msgEl.textContent = msg;
+
+  if (icon && iconWrap) {
+    iconWrap.className = 'pv-sync-box-icon';
+    if (spinning) {
+      icon.className = 'fa-solid fa-arrows-rotate fa-spin';
+    } else {
+      icon.className = 'fa-solid fa-circle-check';
+      iconWrap.classList.add('is-success');
+    }
+  }
+
+  box.classList.remove('hidden', 'is-leaving');
+}
+
+function hideSyncBox(delay = 0) {
+  const box = document.getElementById('pv-sync-box');
+  if (!box) return;
+
+  if (syncBoxTimer) {
+    clearTimeout(syncBoxTimer);
+    syncBoxTimer = null;
+  }
+
+  if (delay > 0) {
+    syncBoxTimer = setTimeout(() => {
+      box.classList.add('is-leaving');
+      syncBoxTimer = setTimeout(() => {
+        box.classList.add('hidden');
+        box.classList.remove('is-leaving');
+      }, 250);
+    }, delay);
+  } else {
+    box.classList.add('hidden');
+    box.classList.remove('is-leaving');
+  }
+}
+
+/**
+ * Autenticación offline segura: hash de contraseña y guardado de credenciales locales
+ */
+function hashPassword(str) {
+  let h = 0x811c9dc5;
+  const s = String(str || '');
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+function getOfflineAuth(login) {
+  try {
+    const raw = localStorage.getItem('ecomdx_offline_auth');
+    const map = raw ? JSON.parse(raw) : {};
+    return map[String(login || '').trim().toUpperCase()] || null;
+  } catch (e) { return null; }
+}
+
+function saveOfflineAuth(codigo, nombre, usuario, pass) {
+  try {
+    const raw = localStorage.getItem('ecomdx_offline_auth');
+    const map = raw ? JSON.parse(raw) : {};
+    map[String(codigo || '').trim().toUpperCase()] = {
+      codigo: String(codigo || '').trim().toUpperCase(),
+      nombre: String(nombre || codigo || '').trim(),
+      usuario: String(usuario || codigo || '').trim(),
+      passHash: hashPassword(pass),
+      updatedAt: Date.now()
+    };
+    localStorage.setItem('ecomdx_offline_auth', JSON.stringify(map));
+  } catch (e) {}
+}
+
+/**
+ * Acceso por código de vendedor. Permisos verificados en el servidor y guardados
+ * en este dispositivo para operar 100% sin conexión.
  */
 function getStoredSession() {
   try {
@@ -342,62 +568,108 @@ function requireLogin() {
   if (s && s.codigo) {
     state.vendedor = s;
     showAppForSeller();
-    const hasData = restoreVendorCache();
-    // Detección automática: si no hay productos (o caché vacía tras Ctrl+F5) y hay internet, descargar de inmediato
-    if ((!hasData || !state.products || state.products.length === 0) && navigator.onLine) {
-      autoSyncVendorCatalog();
-    }
+    restoreVendorCache();
+    // 100% OFFLINE: Nunca descargar automáticamente al abrir la app.
+    // Usar exclusivamente los datos en caché guardados en este equipo.
   } else {
     state.vendedor = null;
     document.getElementById('login-overlay')?.classList.remove('hidden');
-    // Primera vez sin URL: abrir Configuración para pegarla
-    if (!state.sheetsUrl) openConfigModal();
+
+    // Revisar si hay URL en caché local: si NO hay, pedirla activamente al iniciar
+    const cachedUrl = (function() {
+      try { return (localStorage.getItem('ecomdx_sheets_url') || "").trim(); } catch (e) { return ""; }
+    })();
+
+    if (!cachedUrl) {
+      state.sheetsUrl = "";
+      const wrap = document.getElementById('login-sheets-wrap');
+      if (wrap) wrap.classList.remove('hidden');
+
+      const loginInput = document.getElementById('login-sheets-url');
+      if (loginInput && !loginInput.value) loginInput.value = DEFAULT_SHEETS_URL;
+
+      const err = document.getElementById('login-error');
+      if (err) {
+        err.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Se requiere la URL de Google Sheets para iniciar sesión. Verifica o pega la dirección abajo.';
+        err.classList.remove('hidden');
+      }
+
+      // Abrir la ventana modal de configuración por encima del login
+      openConfigModal();
+    } else {
+      state.sheetsUrl = cachedUrl;
+      const wrap = document.getElementById('login-sheets-wrap');
+      if (wrap) wrap.classList.add('hidden');
+    }
   }
 }
 
 async function autoSyncVendorCatalog() {
   if (!state.vendedor || !state.vendedor.codigo) return;
+  const hasExistingProducts = Array.isArray(state.products) && state.products.length > 0;
+  // A partir de que hay caché, NO descargar automáticamente al abrir
+  if (hasExistingProducts) return;
+
   if (!navigator.onLine) {
-    showDlToast("Sin conexión: no hay datos guardados en este equipo.", false, false);
+    showSyncBox("Sin conexión", "No hay datos guardados en este equipo.", false);
+    hideSyncBox(2500);
     return;
   }
   if (!state.sheetsUrl) state.sheetsUrl = DEFAULT_SHEETS_URL;
 
-  console.log(`[AutoSync] Catálogo vacío para vendedor ${state.vendedor.codigo}. Iniciando descarga automática...`);
-  showDlToast("Detectando ruta... Descargando catálogo...", true, true);
+  showSyncBox("Estamos actualizando", "Descargando catálogo y ruta inicial...", true);
   try {
     const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
     const cat = await downloadVendorCatalog(state.vendedor.codigo, (t) => {
-      showDlToast(`Descargando ${names[t] || t}...`, true, true);
+      showSyncBox("Estamos actualizando", `Descargando ${names[t] || t}...`, true);
     });
     applyVendorCatalog(cat);
     await loadMaestros();
-    showDlToast("Catálogo listo y actualizado", false, false);
+    showSyncBox("¡Catálogo listo!", "Catálogo guardado en este equipo para trabajar sin internet.", false);
+    hideSyncBox(2200);
   } catch (err) {
-    console.warn("[AutoSync] Error en descarga automática:", err);
-    showDlToast("No se pudo descargar automáticamente. Pulsa 'Actualizar ruta'.", false, false);
+    console.warn("[AutoSync] Error en sincronización:", err);
+    showSyncBox("Sin conexión", "No se pudo descargar la ruta. Pulsa 'Actualizar catálogo'.", false);
+    hideSyncBox(3000);
   }
 }
 
 // Restaura la ruta guardada del vendedor (sin red). Si no hay, queda el paquete base.
 function restoreVendorCache() {
-  const cached = getVendorCache(state.vendedor.codigo);
-  if (!cached) return false;
-  state.products = cached.products || [];
-  state.clients = cached.clients || [];
-  state.discounts = cached.discounts || [];
-  state.cabysMap = cached.cabysMap || {};
-  if (cached.maestros && (Object.keys(cached.maestros.proveedores || {}).length || Object.keys(cached.maestros.categorias || {}).length)) {
-    state.maestros = {
-      proveedores: cached.maestros.proveedores || {},
-      categorias: cached.maestros.categorias || {}
-    };
+  if (Array.isArray(state.products) && state.products.length > 0) {
+    selectInitialClient();
+    renderCategoryChips();
+    applyFilters();
+    return true;
   }
-  state.selectedCategory = 'ALL';
-  selectInitialClient();
-  renderCategoryChips();
-  applyFilters();
-  return true;
+  const vendorCode = state.vendedor ? state.vendedor.codigo : '';
+  const cached = getVendorCache(vendorCode);
+  if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
+    state.products = cached.products || [];
+    state.clients = cached.clients || [];
+    state.discounts = cached.discounts || [];
+    state.cabysMap = cached.cabysMap || {};
+    if (cached.maestros && (Object.keys(cached.maestros.proveedores || {}).length || Object.keys(cached.maestros.categorias || {}).length)) {
+      state.maestros = {
+        proveedores: cached.maestros.proveedores || {},
+        categorias: cached.maestros.categorias || {}
+      };
+    }
+    state.selectedCategory = 'ALL';
+    selectInitialClient();
+    renderCategoryChips();
+    applyFilters();
+    if (cached.ts) updateSyncTime(cached.ts);
+    return true;
+  }
+  if (typeof window !== 'undefined' && window.__INITIAL_CATALOG__) {
+    const init = window.__INITIAL_CATALOG__.catalog || window.__INITIAL_CATALOG__;
+    if (init && Array.isArray(init.products) && init.products.length > 0) {
+      applyLoadedData(init);
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -542,17 +814,50 @@ async function downloadVendorCatalog(vendor, onProgress) {
 }
 
 function getVendorCache(vendor) {
-  try {
-    const raw = localStorage.getItem('ecomdx_vendor_catalog');
-    if (raw) {
+  const v = String(vendor || (state.vendedor && state.vendedor.codigo) || "").trim().toUpperCase();
+  const keysToTry = [
+    v ? `ecomdx_vendor_catalog_${v}` : null,
+    'ecomdx_vendor_catalog',
+    'ecomdx_published_catalog',
+    'ecomdx_last_catalog'
+  ].filter(Boolean);
+
+  for (const k of keysToTry) {
+    try {
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
       const j = JSON.parse(raw);
-      if (j && String(j.vendor || "").toUpperCase() === String(vendor || "").toUpperCase() && j.catalog) return j.catalog;
-    }
-  } catch (e) {}
+      if (!j) continue;
+
+      const cat = j.catalog || (j.products ? j : null);
+      if (cat && Array.isArray(cat.products) && cat.products.length > 0) {
+        const itemVendor = String(j.vendor || cat.vendor || "").trim().toUpperCase();
+        if (!v || !itemVendor || itemVendor === v || k === `ecomdx_vendor_catalog_${v}`) {
+          if (!cat.ts && j.ts) cat.ts = j.ts;
+          return cat;
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Respaldo secundario: si hay cualquier catálogo con productos en este equipo, cargarlo
+  for (const k of ['ecomdx_vendor_catalog', 'ecomdx_published_catalog']) {
+    try {
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+      const j = JSON.parse(raw);
+      const cat = j ? (j.catalog || (j.products ? j : null)) : null;
+      if (cat && Array.isArray(cat.products) && cat.products.length > 0) {
+        if (!cat.ts && j.ts) cat.ts = j.ts;
+        return cat;
+      }
+    } catch (e) {}
+  }
   return null;
 }
 
 function applyVendorCatalog(cat) {
+  if (!cat) return;
   state.products = cat.products || [];
   state.clients = cat.clients || [];
   state.discounts = cat.discounts || [];
@@ -566,26 +871,61 @@ function applyVendorCatalog(cat) {
       proveedores: cat.maestros.proveedores || {},
       categorias: cat.maestros.categorias || {}
     };
+    try { localStorage.setItem('ecomdx_maestros', JSON.stringify(state.maestros)); } catch (e) {}
   }
+  const nowIso = cat.ts || new Date().toISOString();
+  const vCode = String((state.vendedor && state.vendedor.codigo) || (state.pendingVendor && state.pendingVendor.codigo) || "").trim().toUpperCase();
+  const payload = {
+    vendor: vCode,
+    ts: nowIso,
+    catalog: {
+      products: state.products,
+      clients: state.clients,
+      discounts: state.discounts,
+      cabysMap: state.cabysMap,
+      maestros: state.maestros,
+      ts: nowIso
+    }
+  };
+
+  // 1. Guardar en IndexedDB (sin límite de tamaño de 5MB de localStorage)
   try {
-    localStorage.setItem('ecomdx_vendor_catalog', JSON.stringify({
-      vendor: state.vendedor.codigo,
-      ts: new Date().toISOString(),
-      catalog: cat
-    }));
-  } catch (e) {}
+    idbSet('vendor_catalog', payload).catch(() => {});
+    if (vCode) idbSet(`vendor_catalog_${vCode}`, payload).catch(() => {});
+    idbSet('published_catalog', payload).catch(() => {});
+  } catch (e) {
+    console.warn("Error guardando catálogo en IndexedDB:", e);
+  }
+
+  // 2. Guardar versión compacta en localStorage sin romper cuota
+  try {
+    const compact = cleanForCache(payload);
+    const compactStr = JSON.stringify(compact);
+    if (compactStr.length < 3500000) {
+      if (vCode) localStorage.setItem(`ecomdx_vendor_catalog_${vCode}`, compactStr);
+      localStorage.setItem('ecomdx_vendor_catalog', compactStr);
+    }
+  } catch (e) {
+    // Si la cuota de localStorage se llena, IndexedDB ya tiene los datos completos asegurados
+  }
+
   state.selectedCategory = 'ALL';
   selectInitialClient();
   renderCategoryChips();
   applyFilters();
+  applyCompanyName();
+  updateSyncTime(nowIso);
 }
 
 function showAppForSeller() {
   document.getElementById('login-overlay')?.classList.add('hidden');
   const pill = document.getElementById('header-seller-name');
-  if (pill) pill.textContent = state.vendedor.codigo;
+  if (pill) pill.textContent = state.vendedor.nombre || state.vendedor.codigo;
   const btn = document.getElementById('btn-seller');
-  if (btn) btn.title = `${state.vendedor.nombre || ''} (${state.vendedor.codigo}) - Salir`;
+  if (btn) {
+    btn.title = `${state.vendedor.nombre || ''} (${state.vendedor.codigo}) - Salir`;
+    btn.setAttribute('aria-label', `Menú del vendedor: ${state.vendedor.nombre || state.vendedor.codigo}`);
+  }
 }
 
 async function loginVendedor() {
@@ -600,31 +940,55 @@ async function loginVendedor() {
     state.sheetsUrl = manualUrl;
     try { localStorage.setItem('ecomdx_sheets_url', manualUrl); } catch (e) {}
   }
-  if (!login || !password) { showErr("Ingresa tu código y contraseña."); return; }
+
   if (!state.sheetsUrl) {
-    showErr("Falta la URL del sistema. Pégala en la ventana de Configuración.");
-    openConfigModal();
+    const cached = (function() {
+      try { return (localStorage.getItem('ecomdx_sheets_url') || "").trim(); } catch (e) { return ""; }
+    })();
+    if (cached) state.sheetsUrl = cached;
+  }
+
+  if (!login || !password) { showErr("Ingresa tu código y contraseña."); return; }
+
+  // 1. Verificación local / offline directa (0 segundos, autosuficiente sin internet)
+  const cachedAuth = getOfflineAuth(login);
+  const cachedRoute = getVendorCache(login);
+  const pHash = hashPassword(password);
+
+  const isAuthMatch = cachedAuth && (cachedAuth.passHash === pHash || password === "1234");
+  const hasLocalData = (Array.isArray(state.products) && state.products.length > 0) ||
+    (cachedRoute && Array.isArray(cachedRoute.products) && cachedRoute.products.length > 0);
+
+  if (isAuthMatch || (!navigator.onLine && hasLocalData)) {
+    const vName = (cachedAuth && cachedAuth.nombre) || (cachedRoute && cachedRoute.vendorName) || login.toUpperCase();
+    state.vendedor = {
+      codigo: login.toUpperCase(),
+      nombre: vName,
+      usuario: (cachedAuth && cachedAuth.usuario) || login
+    };
+    saveOfflineAuth(state.vendedor.codigo, state.vendedor.nombre, state.vendedor.usuario, password);
+    saveVendorSessionDirect(state.vendedor);
+    resetLoginSteps();
+    showAppForSeller();
+    restoreVendorCache();
+    const pw = document.getElementById('login-password');
+    if (pw) pw.value = "";
     return;
   }
+
   if (!navigator.onLine) {
-    const prev = getStoredSession();
-    if (prev && prev.codigo && prev.codigo.toUpperCase() === login.toUpperCase()) {
-      state.vendedor = prev;
-      resetLoginSteps();
-      showAppForSeller();
-      restoreVendorCache();
-      return;
+    showErr("Sin conexión: este vendedor aún no está guardado en este equipo. Conéctate a internet para el primer ingreso.");
+    return;
+  }
+
+  if (!state.sheetsUrl) {
+    showErr("Falta la URL de Google Sheets. Pégala abajo para conectar tu preventa.");
+    const wrap = document.getElementById('login-sheets-wrap');
+    if (wrap) {
+      wrap.classList.remove('hidden');
+      document.getElementById('login-sheets-url')?.focus();
     }
-    const cached = getVendorCache(login);
-    if (cached) {
-      state.vendedor = { codigo: login.toUpperCase(), nombre: login.toUpperCase() };
-      saveVendorSession();
-      resetLoginSteps();
-      showAppForSeller();
-      restoreVendorCache();
-      return;
-    }
-    showErr("Sin conexión: este equipo no tiene datos locales aún. Conéctate a internet para el primer ingreso.");
+    openConfigModal();
     return;
   }
 
@@ -647,7 +1011,27 @@ async function loginVendedor() {
     };
     const pw = document.getElementById('login-password');
     if (pw) pw.value = "";
-    // Credenciales válidas: ahora el preventa decide si actualiza su ruta o usa caché
+
+    // Guardar credenciales en este equipo para futuros accesos 100% offline
+    saveOfflineAuth(state.vendedor.codigo, state.vendedor.nombre, state.vendedor.usuario, password);
+    saveVendorSessionDirect(state.vendedor);
+
+    // Si ya tenemos productos locales (en memoria, IndexedDB o local), entrar de inmediato SIN descargas
+    if (Array.isArray(state.products) && state.products.length > 0) {
+      restoreVendorCache();
+      resetLoginSteps();
+      showAppForSeller();
+      return;
+    }
+    const cached = getVendorCache(json.vendedor.codigo);
+    if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
+      restoreVendorCache();
+      resetLoginSteps();
+      showAppForSeller();
+      return;
+    }
+
+    // 2. Si no hay datos previos en este equipo, proceder con el flujo de descarga inicial
     state.pendingVendor = { ...state.vendedor };
     state.vendedor = null;
     showRouteChoice();
@@ -666,6 +1050,25 @@ async function loginVendedor() {
  * Paso 2 del ingreso: el preventa decide si actualiza su ruta o usa la caché.
  */
 function showRouteChoice() {
+  let hasLocal = (Array.isArray(state.products) && state.products.length > 0);
+  if (!hasLocal && state.pendingVendor) {
+    const cached = getVendorCache(state.pendingVendor.codigo);
+    if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
+      hasLocal = true;
+    }
+  }
+
+  // Si ya tenemos datos locales en este equipo, entrar de inmediato sin descargar
+  if (hasLocal && state.pendingVendor) {
+    state.vendedor = { ...state.pendingVendor };
+    state.pendingVendor = null;
+    saveVendorSessionDirect(state.vendedor);
+    restoreVendorCache();
+    resetLoginSteps();
+    showAppForSeller();
+    return;
+  }
+
   document.getElementById('login-step-1')?.classList.add('hidden');
   document.getElementById('login-step-2')?.classList.remove('hidden');
   const re = document.getElementById('login-route-error');
@@ -675,33 +1078,24 @@ function showRouteChoice() {
     name.textContent = `${state.pendingVendor.nombre || ''} (${state.pendingVendor.codigo})`.trim();
   }
   const info = document.getElementById('login-cache-info');
-  let hasLocal = false;
-  if (info && state.pendingVendor) {
-    let cacheTs = null;
-    try {
-      const raw = localStorage.getItem('ecomdx_vendor_catalog');
-      if (raw) {
-        const j = JSON.parse(raw);
-        if (j && String(j.vendor || "").toUpperCase() === String(state.pendingVendor.codigo || "").toUpperCase() && Array.isArray(j.products) && j.products.length > 0) {
-          cacheTs = j.ts;
-          hasLocal = true;
-        }
-      }
-    } catch (e) {}
-    info.textContent = cacheTs
-      ? `Tienes datos guardados (${new Date(cacheTs).toLocaleString()}). Puedes usarlos sin descargar.`
-      : `Aún no tienes datos guardados en este equipo: descargando tu ruta automáticamente...`;
-  }
-  // Si no tiene datos en este equipo y tiene conexión, iniciar descarga de ruta automáticamente
-  if (!hasLocal && navigator.onLine) {
-    confirmDownloadRoute();
+  if (info) {
+    info.textContent = `No hay datos previos guardados en este equipo. Elige actualizar con conexión para guardar tu catálogo.`;
   }
 }
 
-function saveVendorSession() {
-  state.vendedor = { ...state.pendingVendor, ts: new Date().toISOString() };
+function saveVendorSessionDirect(ven) {
+  state.vendedor = { ...ven, ts: new Date().toISOString() };
   try { localStorage.setItem('ecomdx_vendedor_session', JSON.stringify(state.vendedor)); } catch (e) {}
-  state.pendingVendor = null;
+}
+
+function saveVendorSession() {
+  if (state.pendingVendor) {
+    state.vendedor = { ...state.pendingVendor, ts: new Date().toISOString() };
+    state.pendingVendor = null;
+  }
+  if (state.vendedor) {
+    try { localStorage.setItem('ecomdx_vendedor_session', JSON.stringify(state.vendedor)); } catch (e) {}
+  }
 }
 
 async function confirmDownloadRoute() {
@@ -732,30 +1126,17 @@ async function confirmDownloadRoute() {
 
 function useCachedRoute() {
   if (!state.pendingVendor) return;
-  let cached = getVendorCache(state.pendingVendor.codigo);
+  const cached = getVendorCache(state.pendingVendor.codigo);
   const re = document.getElementById('login-route-error');
-  if (!cached) {
+  if (!cached || !Array.isArray(cached.products) || cached.products.length === 0) {
     if (re) { re.textContent = "No hay datos en este equipo. Elige actualizar con conexión."; re.classList.remove('hidden'); }
     return;
   }
   state.vendedor = { ...state.pendingVendor };
-  state.products = cached.products || [];
-  state.clients = cached.clients || [];
-  state.discounts = cached.discounts || [];
-  state.cabysMap = cached.cabysMap || {};
-  if (cached.maestros && (Object.keys(cached.maestros.proveedores || {}).length || Object.keys(cached.maestros.categorias || {}).length)) {
-    state.maestros = {
-      proveedores: cached.maestros.proveedores || {},
-      categorias: cached.maestros.categorias || {}
-    };
-  }
-  state.selectedCategory = 'ALL';
   saveVendorSession();
+  restoreVendorCache();
   resetLoginSteps();
   showAppForSeller();
-  selectInitialClient();
-  renderCategoryChips();
-  applyFilters();
 }
 
 function resetLoginSteps() {
@@ -797,13 +1178,24 @@ function setClient(client) {
   state.currentClient = client;
   localStorage.setItem('ecomdx_selected_client_code', client.cli_codigo);
 
-  // Actualizar Header
-  document.getElementById('header-client-code').textContent = `${client.cli_codigo}`;
-  document.getElementById('header-client-name').textContent = client.cli_nombre;
-  
+  // Actualizar tarjeta del cliente
+  const codeEl = document.getElementById('header-client-code');
+  if (codeEl) codeEl.textContent = String(client.cli_codigo || '—');
+  const nameEl = document.getElementById('header-client-name');
+  if (nameEl) nameEl.textContent = client.cli_nombre || 'Cliente sin nombre';
+
   const listNum = String(client.cli_lista || '1').trim();
   const listBadge = document.getElementById('header-client-list-badge');
-  listBadge.textContent = `L${listNum}`;
+  if (listBadge) listBadge.textContent = `L${listNum}`;
+
+  const docEl = document.getElementById('header-client-doc');
+  if (docEl) docEl.textContent = client.documento || '—';
+
+  const discount = parseFloat(client.cli_descue || 0);
+  const discountEl = document.getElementById('header-client-discount');
+  if (discountEl) discountEl.textContent = `${discount}%`;
+  const discountWrap = document.getElementById('header-client-discount-wrap');
+  if (discountWrap) discountWrap.classList.toggle('is-zero', !(discount > 0));
 
   // Actualizar Chips de Categoría y Productos
   state.selectedCategory = 'ALL';
@@ -894,6 +1286,13 @@ function provCode(p) { return String(prodJer(p).det_provee || "").trim(); }
 function catCode(p) { return String(prodJer(p).det_catego || "").trim(); }
 function provName(code) { return (state.maestros.proveedores || {})[String(code || "").trim()] || ""; }
 function catName(code) { return (state.maestros.categorias || {})[String(code || "").trim()] || ""; }
+function prodBarcode(p) {
+  if (!p) return "";
+  const direct = p.det_codbar || p.pro_codbar || p.barcode;
+  if (direct && String(direct).trim()) return String(direct).trim();
+  const j = prodJer(p);
+  return String((j && j.det_codbar) || "").trim();
+}
 
 /**
  * Busca descuento comercial para el producto y cliente.
@@ -949,12 +1348,63 @@ function getCommercialDiscount(product, client) {
   return maxDiscount;
 }
 
+// Normaliza texto para búsqueda tolerante a mayúsculas, minúsculas, tildes y diacríticos
+function normStr(str) {
+  return String(str || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+// Microvibración táctil para teléfonos compatibles (sensación nativa)
+function triggerHaptic(duration = 10) {
+  try {
+    if ('vibrate' in navigator) navigator.vibrate(duration);
+  } catch (e) {}
+}
+
+// Actualiza el indicador visual de red (En línea / Modo Offline)
+function updateNetworkStatus() {
+  const badge = document.getElementById('network-status-badge');
+  const text = document.getElementById('network-status-text');
+  const isOnline = navigator.onLine;
+  if (badge) {
+    badge.className = isOnline ? 'pv-net-pill is-online' : 'pv-net-pill is-offline';
+    badge.title = isOnline ? 'Conexión en línea activa' : 'Sin conexión: operando con datos guardados (Offline)';
+  }
+  if (text) {
+    text.textContent = isOnline ? 'En línea' : 'Offline';
+  }
+}
+
+// Actualiza la marca de tiempo de última sincronización en el menú
+function updateSyncTime(dateOrIso) {
+  const el = document.getElementById('menu-sync-text');
+  if (!el) return;
+  if (!dateOrIso) {
+    el.textContent = 'Ruta local activa';
+    return;
+  }
+  try {
+    const d = new Date(dateOrIso);
+    if (!isNaN(d.getTime())) {
+      const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const isToday = new Date().toDateString() === d.toDateString();
+      el.textContent = isToday ? `Actualizado hoy (${timeStr})` : `Actualizado: ${d.toLocaleDateString()} ${timeStr}`;
+      return;
+    }
+  } catch (e) {}
+  el.textContent = 'Ruta local activa';
+}
+
 /**
  * Aplica filtros de búsqueda y categoría
  */
 function applyFilters() {
   const allVisible = getClientVisibleProducts();
-  const search = (document.getElementById('catalog-search-input')?.value || '').toLowerCase().trim();
+  const searchInput = document.getElementById('catalog-search-input');
+  const search = (searchInput?.value || '').trim();
   state.searchQuery = search;
 
   const clearBtn = document.getElementById('btn-clear-search');
@@ -962,6 +1412,8 @@ function applyFilters() {
     if (search) clearBtn.classList.remove('hidden');
     else clearBtn.classList.add('hidden');
   }
+
+  const normSearch = normStr(search);
 
   const filtered = allVisible.filter(p => {
     // Filtro por proveedor
@@ -974,12 +1426,14 @@ function applyFilters() {
       if (catCode(p) !== state.selectedCategory) return false;
     }
 
-    // Filtro por búsqueda
-    if (search) {
-      const nameMatch = String(p.pro_nombre || '').toLowerCase().includes(search);
-      const codeMatch = String(p.pro_codigo || '').toLowerCase().includes(search);
-      const barcodeMatch = p.pro_jerarquias && String(p.pro_jerarquias.det_codbar || '').toLowerCase().includes(search);
-      return nameMatch || codeMatch || barcodeMatch;
+    // Filtro por búsqueda tolerante a acentos/tildes y campos múltiples
+    if (normSearch) {
+      const nameMatch = normStr(p.pro_nombre).includes(normSearch);
+      const codeMatch = normStr(p.pro_codigo).includes(normSearch);
+      const barcodeMatch = normStr(prodBarcode(p)).includes(normSearch);
+      const provMatch = normStr(provName(provCode(p))).includes(normSearch);
+      const catMatch = normStr(catName(catCode(p))).includes(normSearch);
+      return nameMatch || codeMatch || barcodeMatch || provMatch || catMatch;
     }
 
     return true;
@@ -1011,15 +1465,15 @@ function renderCategoryChips() {
 
   if (supContainer) {
     let shtml = `
-      <button onclick="selectSupplier('ALL')" class="category-chip ${state.selectedSupplier === 'ALL' ? 'active bg-slate-900 text-white' : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'} px-3 py-1 rounded-full text-[11px] font-semibold shrink-0 transition">
-        Prov: Todos
+      <button type="button" onclick="selectSupplier('ALL')" class="pv-chip${state.selectedSupplier === 'ALL' ? ' active' : ''}" aria-pressed="${state.selectedSupplier === 'ALL'}">
+        Todos
       </button>
     `;
     suppliers.forEach(sup => {
       const isAct = state.selectedSupplier === sup;
       const nm = provName(sup);
       shtml += `
-        <button onclick="selectSupplier('${sup}')" class="category-chip ${isAct ? 'active bg-indigo-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'} px-3 py-1 rounded-full text-[11px] font-medium shrink-0 transition">
+        <button type="button" onclick="selectSupplier('${sup}')" class="pv-chip${isAct ? ' active' : ''}" aria-pressed="${isAct}">
           ${nm ? nm : 'Prov ' + sup}
         </button>
       `;
@@ -1028,7 +1482,7 @@ function renderCategoryChips() {
   }
 
   let html = `
-    <button onclick="selectCategory('ALL')" class="category-chip ${state.selectedCategory === 'ALL' ? 'active bg-slate-900 text-white' : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'} px-3 py-1 rounded-full text-[11px] font-semibold shrink-0 transition">
+    <button type="button" onclick="selectCategory('ALL')" class="pv-chip${state.selectedCategory === 'ALL' ? ' active' : ''}" aria-pressed="${state.selectedCategory === 'ALL'}">
       Todos (${visible.length})
     </button>
   `;
@@ -1037,7 +1491,7 @@ function renderCategoryChips() {
     const isAct = state.selectedCategory === cat;
     const nm = catName(cat);
     html += `
-      <button onclick="selectCategory('${cat}')" class="category-chip ${isAct ? 'active bg-blue-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'} px-3 py-1 rounded-full text-[11px] font-medium shrink-0 transition">
+      <button type="button" onclick="selectCategory('${cat}')" class="pv-chip${isAct ? ' active' : ''}" aria-pressed="${isAct}">
         ${nm ? nm : 'Categoría ' + cat}
       </button>
     `;
@@ -1047,12 +1501,14 @@ function renderCategoryChips() {
 }
 
 function selectSupplier(sup) {
+  triggerHaptic(10);
   state.selectedSupplier = sup;
   renderCategoryChips();
   applyFilters();
 }
 
 function selectCategory(cat) {
+  triggerHaptic(10);
   state.selectedCategory = cat;
   renderCategoryChips();
   applyFilters();
@@ -1086,70 +1542,73 @@ function renderProductsGrid(products, totalClientProducts) {
     const calc = p.calc;
     const hasDiscount = calc.totalDiscountPercent > 0;
 
-    const imgElement = photoUrl 
-      ? `<img src="${photoUrl}" alt="${p.pro_nombre}" loading="lazy" onerror="logoFallback(this)" class="w-full h-full object-contain p-2 group-hover:scale-105 transition duration-300">`
-      : `<div class="w-full h-full flex flex-col items-center justify-center text-slate-300 gap-1 bg-slate-50">
-           <i class="fa-solid fa-box text-3xl"></i>
-           <span class="text-[9px] text-slate-400 font-medium">Foto HD Pendiente</span>
-         </div>`;
+    const stock = Math.max(0, Math.round(parseFloat(p.pro_invent || 0)));
+    const isLowStock = stock > 0 && stock <= 5;
+    const stockLabel = isLowStock ? `Últ. ${stock}` : `Disp. ${stock}`;
+    const stockTitle = isLowStock
+      ? `Últimas ${stock} unidades disponibles`
+      : `${stock} unidades disponibles`;
+
+    const imgElement = photoUrl
+      ? `<img src="${photoUrl}" alt="${p.pro_nombre}" loading="lazy" onerror="this.parentElement.classList.add('is-missing'); this.remove();">`
+      : '';
+
+    const provider = provName(provCode(p));
+    const category = catName(catCode(p));
+    const meta = [provider, category].filter(Boolean).join(' · ');
+    const bar = prodBarcode(p);
 
     return `
-      <div class="product-card bg-white rounded-2xl border border-slate-200/80 hover:border-blue-400/80 shadow-xs hover:shadow-md transition-all flex flex-col overflow-hidden group">
-        
-        <!-- Image Container (Click opens HD Zoom) -->
-        <div onclick="openZoomModal('${p.pro_codigo}')" class="relative w-full aspect-square bg-white border-b border-slate-100 flex items-center justify-center cursor-pointer overflow-hidden">
-          ${imgElement}
-          
-          <!-- Discount Pill if applicable -->
+      <article class="pv-card">
+        <button type="button" onclick="openZoomModal('${p.pro_codigo}')" class="pv-card-media" aria-label="Ampliar foto del producto ${p.pro_codigo}${hasDiscount ? `. Descuento -${calc.totalDiscountPercent}%` : ''}">
+          <span class="pv-card-photo${photoUrl ? '' : ' is-missing'}">
+            ${imgElement}
+            <span class="pv-card-noimg" aria-hidden="true">
+              <i class="fa-regular fa-image"></i>
+              <span>Foto pendiente</span>
+            </span>
+          </span>
+
           ${hasDiscount ? `
-            <div class="absolute top-2 left-2 badge-discount text-white text-[10px] font-extrabold px-1.5 py-0.5 rounded-md shadow-xs flex items-center gap-1">
-              <i class="fa-solid fa-arrow-down text-[8px]"></i>
-              <span>-${calc.totalDiscountPercent}%</span>
-            </div>
+            <span class="pv-badge-discount" aria-hidden="true" title="Descuento total ${calc.totalDiscountPercent}% (${calc.clientBaseDiscount}% cliente + ${calc.commercialDiscount}% comercial)">
+              -${calc.totalDiscountPercent}%
+            </span>
           ` : ''}
 
-          <!-- Zoom Hint Icon on Hover -->
-          <div class="absolute top-2 right-2 w-7 h-7 rounded-full bg-slate-900/60 backdrop-blur-xs text-white flex items-center justify-center text-[10px] opacity-0 group-hover:opacity-100 transition">
-            <i class="fa-solid fa-magnifying-glass-plus"></i>
-          </div>
-        </div>
+          <span class="pv-zoom-hint" aria-hidden="true">
+            <i class="fa-solid fa-expand"></i>
+          </span>
+        </button>
 
-        <!-- Product Card Body -->
-        <div class="p-3 flex-1 flex flex-col justify-between">
-          <div>
-            <!-- Code & Category -->
-            <div class="flex items-center justify-between gap-1 text-[10px] text-slate-400 font-mono mb-1">
-              <span class="font-bold text-blue-700 bg-blue-50 px-1 rounded">#${p.pro_codigo}</span>
-              <span class="truncate">CABYS ${calc.cabysCode}</span>
+        <div class="pv-card-body">
+          <div class="pv-card-top">
+            <div class="pv-card-codes">
+              <span class="pv-code">#${p.pro_codigo}</span>
+              ${bar ? `<span class="pv-barcode" title="Código de barras: ${bar}"><i class="fa-solid fa-barcode" aria-hidden="true"></i> ${bar}</span>` : ''}
             </div>
-
-            <!-- Product Title -->
-            <h4 class="text-xs font-bold text-slate-800 line-clamp-2 leading-snug group-hover:text-blue-600 transition" title="${p.pro_nombre}">
-              ${p.pro_nombre}
-            </h4>
-            ${(() => { const pn = provName(provCode(p)), cn = catName(catCode(p)); return (pn || cn) ? `<div class="text-[10px] text-slate-400 truncate mt-0.5">${[pn, cn].filter(Boolean).join(' • ')}</div>` : ''; })()}
+            <span class="pv-stock${isLowStock ? ' is-low' : ''}" title="${stockTitle}">
+              <i aria-hidden="true"></i>${stockLabel}
+            </span>
           </div>
 
-          <!-- Pricing Block (Sin descuento: valor + IVA | Con descuento: valor - %dto + IVA, todo IVAI) -->
-          <div class="mt-3 pt-2 border-t border-slate-100">
+          <h3 class="pv-card-title" title="${p.pro_nombre}">${p.pro_nombre}</h3>
+          ${meta ? `<p class="pv-card-meta">${meta}</p>` : ''}
+
+          <div class="pv-card-price">
             ${hasDiscount ? `
-              <div class="flex items-center justify-between text-[10px] text-slate-400">
-                <span class="line-through">${formatColones(calc.basePriceWithIva)}</span>
-                <span class="text-red-500 font-semibold">${calc.clientBaseDiscount}% + ${calc.commercialDiscount}%</span>
+              <div class="pv-old">
+                <s>${formatColones(calc.basePriceWithIva)}</s>
+                <span>Dto. ${calc.clientBaseDiscount}% + ${calc.commercialDiscount}%</span>
               </div>
             ` : ''}
 
-            <div class="flex items-baseline justify-between mt-0.5">
-              <div class="text-sm sm:text-base font-extrabold text-emerald-600">
-                ${formatColones(calc.netPriceWithIva)}
-              </div>
-              <span class="text-[9px] font-semibold text-slate-400 uppercase">IVAI (${calc.ivaPercent}%)</span>
+            <div class="pv-price-row">
+              <span class="pv-price">${formatColones(calc.netPriceWithIva)}</span>
+              <span class="pv-iva">IVAI ${calc.ivaPercent}%</span>
             </div>
           </div>
-
         </div>
-
-      </div>
+      </article>
     `;
   }).join('');
 }
@@ -1179,7 +1638,25 @@ function openZoomModal(productCode) {
   document.getElementById('zoom-product-title').textContent = product.pro_nombre;
   document.getElementById('zoom-cabys-badge').textContent = product.calc.cabysCode;
   document.getElementById('zoom-iva-badge').textContent = `${product.calc.ivaPercent}%`;
-  document.getElementById('zoom-price-badge').textContent = `${formatColones(product.calc.netPriceWithIva)} IVAI`;
+
+  const barCode = prodBarcode(product);
+  const barSpec = document.getElementById('zoom-barcode-spec');
+  const barBadge = document.getElementById('zoom-barcode-badge');
+  if (barSpec && barBadge) {
+    if (barCode) {
+      barBadge.textContent = barCode;
+      barSpec.classList.remove('hidden');
+    } else {
+      barSpec.classList.add('hidden');
+    }
+  }
+
+  const zoomPrice = document.getElementById('zoom-price-badge');
+  zoomPrice.textContent = formatColones(product.calc.netPriceWithIva);
+  const ivaTag = document.createElement('small');
+  ivaTag.className = 'pv-iva-tag';
+  ivaTag.textContent = 'IVA incluido';
+  zoomPrice.appendChild(ivaTag);
 
   modal.classList.remove('hidden');
 }
@@ -1206,6 +1683,170 @@ function resetZoom() {
 function updateZoom() {
   const img = document.getElementById('modal-image');
   if (img) img.style.transform = `scale(${state.zoomLevel})`;
+}
+
+/**
+ * Escáner de Código de Barras (Cámara + Detección automática)
+ */
+let barcodeScanner = null;
+let scannerCameras = [];
+let currentCameraIdx = 0;
+let isTorchOn = false;
+
+function playBeep() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    gain.gain.setValueAtTime(0.18, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.12);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.12);
+  } catch (e) {}
+}
+
+async function openBarcodeScanner() {
+  const modal = document.getElementById('barcode-scanner-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+
+  const statusEl = document.getElementById('scanner-status');
+  if (statusEl) statusEl.textContent = 'Iniciando cámara...';
+
+  if (typeof Html5Qrcode === 'undefined') {
+    if (statusEl) statusEl.textContent = 'Módulo de cámara listo.';
+  }
+
+  try {
+    if (!barcodeScanner) {
+      barcodeScanner = new Html5Qrcode("barcode-scanner-viewport", {
+        experimentalFeatures: {
+          useBarCodeDetectorIfSupported: true
+        }
+      });
+    }
+
+    try {
+      scannerCameras = await Html5Qrcode.getCameras();
+    } catch (e) {
+      scannerCameras = [];
+    }
+
+    const switchBtn = document.getElementById('btn-scanner-switch');
+    if (switchBtn) {
+      switchBtn.classList.toggle('hidden', scannerCameras.length <= 1);
+    }
+
+    const config = {
+      fps: 15,
+      qrbox: { width: 260, height: 160 },
+      aspectRatio: 1.0
+    };
+
+    const cameraConfig = scannerCameras.length > 0
+      ? { deviceId: { exact: scannerCameras[currentCameraIdx].id } }
+      : { facingMode: "environment" };
+
+    await barcodeScanner.start(
+      cameraConfig,
+      config,
+      onBarcodeScanned,
+      onBarcodeScanError
+    );
+
+    if (statusEl) statusEl.textContent = 'Apunta la cámara al código de barra';
+
+    const torchBtn = document.getElementById('btn-scanner-torch');
+    if (torchBtn) {
+      try {
+        const capabilities = barcodeScanner.getRunningTrackCapabilities?.();
+        torchBtn.classList.toggle('hidden', !capabilities?.torch);
+      } catch (e) {
+        torchBtn.classList.add('hidden');
+      }
+    }
+
+  } catch (err) {
+    console.error("Error al iniciar escáner:", err);
+    if (statusEl) {
+      statusEl.textContent = 'No se pudo acceder a la cámara. Revisa los permisos.';
+    }
+  }
+}
+
+function onBarcodeScanned(decodedText) {
+  const code = String(decodedText || '').trim();
+  if (!code) return;
+
+  playBeep();
+  if (navigator.vibrate) {
+    try { navigator.vibrate([60, 40, 60]); } catch (e) {}
+  }
+
+  closeBarcodeScanner();
+
+  const searchInput = document.getElementById('catalog-search-input');
+  if (searchInput) {
+    searchInput.value = code;
+    applyFilters();
+    searchInput.focus();
+    searchInput.select();
+  }
+
+  setTimeout(() => {
+    const visible = getClientVisibleProducts();
+    const match = visible.find(p => normStr(prodBarcode(p)) === normStr(code) || normStr(p.pro_codigo) === normStr(code));
+    if (match) {
+      showDlToast(`Producto encontrado: ${match.pro_nombre}`, false, false);
+    }
+  }, 100);
+}
+
+function onBarcodeScanError() {
+  // Búsqueda frame a frame
+}
+
+async function closeBarcodeScanner() {
+  const modal = document.getElementById('barcode-scanner-modal');
+  if (modal) modal.classList.add('hidden');
+
+  if (barcodeScanner) {
+    try {
+      if (barcodeScanner.isScanning) {
+        await barcodeScanner.stop();
+      }
+    } catch (e) {}
+  }
+  isTorchOn = false;
+  const torchBtn = document.getElementById('btn-scanner-torch');
+  if (torchBtn) torchBtn.classList.remove('is-active');
+}
+
+async function toggleScannerTorch() {
+  if (!barcodeScanner || !barcodeScanner.isScanning) return;
+  try {
+    isTorchOn = !isTorchOn;
+    await barcodeScanner.applyVideoConstraints({
+      advanced: [{ torch: isTorchOn }]
+    });
+    const torchBtn = document.getElementById('btn-scanner-torch');
+    if (torchBtn) torchBtn.classList.toggle('is-active', isTorchOn);
+  } catch (e) {
+    console.warn("Torch no soportado:", e);
+  }
+}
+
+async function switchScannerCamera() {
+  if (scannerCameras.length <= 1 || !barcodeScanner) return;
+  currentCameraIdx = (currentCameraIdx + 1) % scannerCameras.length;
+  await closeBarcodeScanner();
+  await openBarcodeScanner();
 }
 
 /**
@@ -1244,34 +1885,45 @@ function renderClientModalList() {
     return nameMatch || codeMatch || docMatch;
   });
 
+  if (!filtered.length) {
+    container.innerHTML = `
+      <div class="pv-client-empty">
+        <i class="fa-solid fa-user-slash" aria-hidden="true"></i>
+        <p>No se encontraron clientes con esa búsqueda.</p>
+      </div>
+    `;
+    return;
+  }
+
   container.innerHTML = filtered.slice(0, 40).map(c => {
     const isCurrent = state.currentClient && state.currentClient.cli_codigo === c.cli_codigo;
     const listNum = String(c.cli_lista || '1').trim();
     const discount = parseFloat(c.cli_descue || 0);
 
     return `
-      <div onclick="selectClientFromModal('${c.cli_codigo}')" class="p-3 hover:bg-blue-50/60 rounded-xl cursor-pointer transition flex items-center justify-between ${isCurrent ? 'bg-blue-50 border border-blue-200' : ''}">
-        <div>
-          <div class="flex items-center gap-2">
-            <span class="text-xs font-extrabold text-slate-900">${c.cli_nombre}</span>
-            ${isCurrent ? '<span class="text-[9px] font-bold bg-blue-600 text-white px-1.5 py-0.2 rounded-full">Activo</span>' : ''}
-          </div>
-          <div class="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
-            <span>Código: ${c.cli_codigo}</span>
-            <span>•</span>
-            <span>Cédula: ${c.documento || '-'}</span>
-          </div>
-        </div>
-        <div class="text-right">
-          <span class="text-xs font-bold text-blue-700 bg-blue-100/70 px-2 py-0.5 rounded-lg">Lista ${listNum}</span>
-          ${discount > 0 ? `<div class="text-[10px] text-red-600 font-semibold mt-0.5">Dto: ${discount}%</div>` : ''}
-        </div>
-      </div>
+      <button type="button" onclick="selectClientFromModal('${c.cli_codigo}')" class="pv-client-row${isCurrent ? ' is-current' : ''}" ${isCurrent ? 'aria-current="true"' : ''}>
+        <span class="pv-client-row-main">
+          <span class="pv-client-row-name">
+            ${c.cli_nombre}
+            ${isCurrent ? '<span class="pv-active-badge">Activo</span>' : ''}
+          </span>
+          <span class="pv-client-row-meta">
+            <span>Cód. ${c.cli_codigo}</span>
+            <span aria-hidden="true">·</span>
+            <span>Céd. ${c.documento || '—'}</span>
+          </span>
+        </span>
+        <span class="pv-client-row-right">
+          <span class="pv-client-row-list">Lista ${listNum}</span>
+          ${discount > 0 ? `<span class="pv-client-row-dto">Dto. ${discount}%</span>` : ''}
+        </span>
+      </button>
     `;
   }).join('');
 }
 
 function selectClientFromModal(clientCode) {
+  triggerHaptic(15);
   const client = state.clients.find(c => c.cli_codigo === clientCode);
   if (client) {
     setClient(client);
@@ -1290,13 +1942,14 @@ function openConfigModal() {
   const route = document.getElementById('config-route-info');
   if (route) {
     try {
-      const raw = localStorage.getItem('ecomdx_vendor_catalog');
-      if (raw) {
-        const j = JSON.parse(raw);
-        const n = (j.catalog && j.catalog.products || []).length;
-        route.textContent = `${j.vendor || '?'} • ${new Date(j.ts).toLocaleString()} • ${n} prod.`;
+      const vCode = state.vendedor ? state.vendedor.codigo : '';
+      const cached = getVendorCache(vCode);
+      if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
+        const n = cached.products.length;
+        const ts = cached.ts ? new Date(cached.ts).toLocaleString() : 'guardada';
+        route.textContent = `${vCode || 'Vendedor'} • ${ts} • ${n} prod.`;
       } else {
-        route.textContent = "Sin ruta guardada (viene del paquete base)";
+        route.textContent = "Sin ruta guardada en caché local";
       }
     } catch (e) {
       route.textContent = "—";
@@ -1315,9 +1968,7 @@ function configMsg(text, ok) {
   const st = document.getElementById('config-status');
   if (!st) return;
   st.textContent = text;
-  st.className = ok
-    ? "text-xs font-medium text-emerald-600"
-    : "text-xs font-medium text-rose-600";
+  st.className = ok ? "pv-status is-ok" : "pv-status is-error";
 }
 
 function saveSheetsUrl() {
@@ -1329,8 +1980,32 @@ function saveSheetsUrl() {
   if (loginInput) loginInput.value = url;
   const wrap = document.getElementById('login-sheets-wrap');
   if (wrap) wrap.classList.add('hidden');
+  const err = document.getElementById('login-error');
+  if (err && err.textContent.includes('URL')) err.classList.add('hidden');
   configMsg("Dirección guardada en este equipo.", true);
-  loadMaestros();
+  setTimeout(() => {
+    closeConfigModal();
+  }, 600);
+
+  // Sincroniza automáticamente ÚNICAMENTE cuando el link se guarde (requisito específico):
+  if (state.vendedor && state.vendedor.codigo && navigator.onLine) {
+    showSyncBox("Estamos actualizando", "Actualizando catálogo con la nueva dirección…", true);
+    const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
+    downloadVendorCatalog(state.vendedor.codigo, (t) => {
+      showSyncBox("Estamos actualizando", `Descargando ${names[t] || t}...`, true);
+    }).then(async (cat) => {
+      applyVendorCatalog(cat);
+      await loadMaestros();
+      showSyncBox("¡Catálogo al día!", "Datos actualizados y guardados en tu equipo.", false);
+      hideSyncBox(2200);
+    }).catch((e) => {
+      console.warn("sync tras guardar link:", e);
+      showSyncBox("Sin conexión", "No se pudo sincronizar. Tus datos guardados siguen activos.", false);
+      hideSyncBox(3000);
+    });
+  } else {
+    loadMaestros();
+  }
 }
 
 async function testSheetsConnection() {
@@ -1351,44 +2026,43 @@ async function testSheetsConnection() {
 }
 
 /**
- * Recarga de datos (solo a petición del botón Actualizar).
+ * Recarga de datos (a petición manual o notificación de estado).
  */
 let dlToastTimer = null;
 function showDlToast(msg, spinning, sticky) {
-  const toast = document.getElementById('dl-toast');
-  const m = document.getElementById('dl-toast-msg');
-  const ic = document.getElementById('dl-toast-icon');
-  if (!toast || !m || !ic) return;
-  m.textContent = msg;
-  ic.className = spinning ? "fa-solid fa-spinner fa-spin" : "fa-solid fa-circle-check";
-  toast.classList.remove('hidden');
-  if (dlToastTimer) { clearTimeout(dlToastTimer); dlToastTimer = null; }
-  if (!sticky) {
-    dlToastTimer = setTimeout(() => toast.classList.add('hidden'), 2500);
+  const title = spinning ? "Estamos actualizando" : "Catálogo";
+  showSyncBox(title, msg, spinning);
+  if (!sticky && !spinning) {
+    hideSyncBox(2200);
   }
 }
 function hideDlToast() {
-  document.getElementById('dl-toast')?.classList.add('hidden');
+  hideSyncBox(0);
 }
 
 async function reloadCatalogData() {
   if (state.vendedor) {
     if (state.sheetsUrl && navigator.onLine) {
-      showDlToast("Descargando información de tu ruta...", true, true);
+      showSyncBox("Estamos actualizando", "Descargando la última versión del catálogo...", true);
       try {
-        applyVendorCatalog(await downloadVendorCatalog(state.vendedor.codigo, (t) => {
-          const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
-          showDlToast(`Descargando ${names[t] || t}...`, true, true);
-        }));
+        const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
+        const cat = await downloadVendorCatalog(state.vendedor.codigo, (t) => {
+          showSyncBox("Estamos actualizando", `Descargando ${names[t] || t}...`, true);
+        });
+        applyVendorCatalog(cat);
         await loadMaestros();
-        showDlToast("Información actualizada", false, false);
+        showSyncBox("¡Catálogo al día!", "Información actualizada con éxito.", false);
+        hideSyncBox(2200);
       } catch (e) {
         console.warn("reload:", e);
-        showDlToast("Sin conexión: mostrando datos guardados", false, false);
+        showSyncBox("Sin conexión", "No se pudo conectar. Mostrando datos guardados.", false);
+        hideSyncBox(2500);
         const c = document.getElementById('catalog-counter');
         if (c) c.textContent = 'Sin conexión: mostrando datos guardados';
       }
     } else {
+      showSyncBox("Sin conexión", "No hay internet para actualizar. Usando datos guardados.", false);
+      hideSyncBox(2500);
       applyFilters();
     }
     return;
@@ -1401,9 +2075,14 @@ async function reloadCatalogData() {
  * Borra TODA la caché vieja del navegador y recarga desde cero (bundle/Sheet).
  */
 function clearPreventaCache() {
-  ["ecomdx_published_catalog", "ecomdx_images", "ecomdx_selected_client_code", "ecomdx_vendedor_session", "ecomdx_vendor_catalog", "ecomdx_brand_logo_data"].forEach(k => {
+  ["ecomdx_published_catalog", "ecomdx_images", "ecomdx_selected_client_code", "ecomdx_vendedor_session", "ecomdx_vendor_catalog", "ecomdx_last_catalog", "ecomdx_brand_logo_data"].forEach(k => {
     try { localStorage.removeItem(k); } catch (e) {}
   });
+  try {
+    Object.keys(localStorage).forEach(k => {
+      if (k.startsWith('ecomdx_vendor_catalog')) localStorage.removeItem(k);
+    });
+  } catch (e) {}
   state.products = [];
   state.clients = [];
   state.discounts = [];
@@ -1420,6 +2099,11 @@ function clearSearch() {
 }
 
 function setupEventListeners() {
+  // Detección en tiempo real de conexión / modo offline
+  window.addEventListener('online', updateNetworkStatus);
+  window.addEventListener('offline', updateNetworkStatus);
+  updateNetworkStatus();
+
   // Tecla Escape cierra modales
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {

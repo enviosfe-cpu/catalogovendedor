@@ -4,319 +4,380 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
   <title>Distribuciones Castro | Catálogo Digital Preventa</title>
-  
+  <meta name="description" content="Catálogo digital de preventa de Distribuciones Castro: consulta productos, precios con IVA y disponibilidad para tu ruta.">
+
   <!-- PWA Manifest & Meta Tags -->
   <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#2563eb">
+  <meta name="theme-color" content="#0B1B3A">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="./logo.png">
 
-  <!-- Tailwind CSS & FontAwesome -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Fuentes, iconos y estilos -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=5.9">
 </head>
-<body class="bg-slate-100 text-slate-800 min-h-screen flex flex-col antialiased">
+<body>
 
-  <!-- App Header (Sticky) -->
-  <header class="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-    <div class="max-w-7xl mx-auto px-3 sm:px-6 py-2.5">
-      
-      <!-- Top Row: Logo, Client Quick View, Action Buttons -->
-      <div class="flex items-center gap-1.5 relative">
-        
-        <!-- Logo Empresa -->
-        <div class="flex items-center shrink-0">
-          <img id="header-logo" src="./logo.png" onerror="brandLogoFallback(this)" alt="Logo" class="w-11 h-11 rounded-xl object-cover shadow-md">
+  <!-- Alerta / Cuadrito de actualización de catálogo -->
+  <div id="pv-sync-box" class="hidden pv-sync-box" role="status" aria-live="polite">
+    <div class="pv-sync-box-card">
+      <div class="pv-sync-box-icon">
+        <i id="pv-sync-icon" class="fa-solid fa-arrows-rotate fa-spin"></i>
+      </div>
+      <div class="pv-sync-box-text">
+        <b id="pv-sync-title">Estamos actualizando</b>
+        <p id="pv-sync-msg">Espera un momento, cargando catálogo en tu equipo…</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Barra superior fija -->
+  <header class="pv-topbar">
+    <div class="pv-topbar-in">
+      <div class="pv-brand">
+        <img id="header-logo" src="./logo.png" onerror="brandLogoFallback(this)" alt="Logo" class="pv-brand-logo">
+        <div class="pv-brand-copy">
+          <div id="header-company-name" class="pv-brand-company">Distribuciones Castro</div>
+          <div class="pv-brand-meta"><span>Preventa</span><span class="pv-brand-meta-extra"> · Catálogo digital</span></div>
         </div>
+      </div>
 
-        <!-- Current Client Pill / Selector Trigger -->
-        <button onclick="openClientModal()" class="flex-1 min-w-0 mx-1 px-2.5 py-1.5 rounded-xl bg-blue-50/70 hover:bg-blue-100/70 border border-blue-200/60 transition flex items-center justify-between text-left group">
-          <div class="truncate mr-1 min-w-0">
-            <div class="text-[10px] uppercase font-bold text-blue-800 tracking-wider flex items-center gap-1">
-              <i class="fa-solid fa-store text-[9px] shrink-0"></i>
-              <span id="header-client-code" class="truncate">Cliente</span>
-              <span id="header-client-list-badge" class="bg-blue-600 text-white text-[9px] px-1 py-0.5 rounded font-bold shrink-0">L1</span>
-            </div>
-            <div id="header-client-name" class="text-xs font-bold text-slate-900 truncate">Seleccionar Cliente</div>
-          </div>
-          <span class="text-blue-600 text-xs shrink-0">
-            <i class="fa-solid fa-chevron-down"></i>
-          </span>
+      <div class="pv-topbar-actions">
+        <span id="network-status-badge" class="pv-net-pill is-online" title="Conexión en línea" aria-live="polite">
+          <span class="pv-net-dot" aria-hidden="true"></span>
+          <span id="network-status-text" class="pv-net-text">En línea</span>
+        </span>
+
+        <button type="button" onclick="reloadCatalogData()" title="Actualizar catálogo" aria-label="Actualizar catálogo" class="pv-icon-btn">
+          <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i>
         </button>
 
-        <!-- Action Buttons -->
-        <div class="flex items-center gap-1 shrink-0">
-          <!-- Refresh Data Button -->
-          <button onclick="reloadCatalogData()" title="Actualizar Catálogo" class="w-10 h-10 flex items-center justify-center rounded-xl bg-slate-100 active:bg-slate-300 text-slate-700 transition touch-manipulation shrink-0">
-            <i class="fa-solid fa-arrows-rotate text-sm"></i>
-          </button>
-
-          <!-- Seller Session -->
-          <button id="btn-seller" onclick="toggleMenu()" title="Sesión de vendedor y menú" class="h-10 pl-2 pr-2.5 flex items-center gap-1 rounded-xl bg-indigo-50 active:bg-indigo-100 text-indigo-700 border border-indigo-200 transition touch-manipulation shrink-0">
-            <i class="fa-solid fa-id-badge text-sm"></i>
-            <span id="header-seller-name" class="text-xs font-bold max-w-[60px] truncate hidden min-[400px]:inline">...</span>
-            <i class="fa-solid fa-ellipsis-vertical text-xs opacity-60"></i>
-          </button>
-        </div>
-
-        <!-- Mobile Menu Dropdown -->
-        <div id="app-menu" class="hidden absolute right-3 sm:right-6 top-full mt-1 w-60 bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden z-40">
-          <div class="p-2 flex flex-col text-sm">
-            <button id="menu-install" onclick="installPWA()" class="hidden menu-item">
-              <i class="fa-solid fa-download w-5 text-center text-emerald-600"></i>
-              <span>Instalar app</span>
-            </button>
-            <button onclick="openClientModal();toggleMenu(true)" class="menu-item">
-              <i class="fa-solid fa-store w-5 text-center text-blue-600"></i>
-              <span>Cambiar cliente</span>
-            </button>
-            <button onclick="reloadCatalogData();toggleMenu(true)" class="menu-item">
-              <i class="fa-solid fa-arrows-rotate w-5 text-center text-slate-500"></i>
-              <span>Actualizar catálogo</span>
-            </button>
-            <button onclick="openConfigModal();toggleMenu(true)" class="menu-item">
-              <i class="fa-solid fa-gear w-5 text-center text-slate-500"></i>
-              <span>Configuración</span>
-            </button>
-            <button onclick="clearPreventaCache()" class="menu-item">
-              <i class="fa-solid fa-trash-can w-5 text-center text-rose-500"></i>
-              <span>Borrar caché</span>
-            </button>
-            <div class="h-px bg-slate-100 my-1"></div>
-            <button onclick="logoutVendedor()" class="menu-item">
-              <i class="fa-solid fa-right-from-bracket w-5 text-center text-rose-500"></i>
-              <span>Cerrar sesión</span>
-            </button>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- Search & Filters Row -->
-      <div class="mt-2.5 flex flex-col sm:flex-row gap-2 items-center">
-        <!-- Search Input -->
-        <div class="w-full sm:flex-1 relative">
-          <i class="fa-solid fa-magnifying-glass absolute left-4 top-4 text-slate-400 text-sm"></i>
-          <input type="text" id="catalog-search-input" oninput="applyFilters()" placeholder="Buscar producto por nombre, código o código de barras..." class="w-full pl-11 pr-10 py-3.5 text-base rounded-2xl bg-slate-100 border border-transparent focus:border-blue-500 focus:bg-white focus:outline-none transition shadow-xs">
-          <button id="btn-clear-search" onclick="clearSearch()" class="hidden absolute right-3.5 top-3.5 text-slate-400 hover:text-slate-600 text-sm">
-            <i class="fa-solid fa-xmark"></i>
-          </button>
-        </div>
-
-        <!-- Filter info -->
-        <div class="w-full sm:w-auto flex items-center justify-between gap-3 text-xs text-slate-500 px-1">
-          <span id="catalog-counter" class="font-medium text-slate-700">Cargando productos...</span>
-        </div>
-      </div>
-
-      <!-- Supplier Filter Pills (Horizontal Scroll) -->
-      <div id="supplier-chips-container" class="mt-2 flex gap-1.5 overflow-x-auto no-scrollbar py-1">
-        <!-- Injected via JS -->
-      </div>
-
-      <!-- Category Filter Pills (Horizontal Scroll) -->
-      <div id="category-chips-container" class="mt-1 flex gap-1.5 overflow-x-auto no-scrollbar py-1">
-        <button onclick="selectCategory('ALL')" class="category-chip active px-3 py-1 rounded-full text-[11px] font-semibold bg-slate-900 text-white shrink-0 transition">
-          Todos los Productos
+        <button id="btn-seller" type="button" onclick="toggleMenu()" title="Sesión de vendedor y menú" aria-label="Abrir menú del vendedor" aria-expanded="false" aria-haspopup="menu" class="pv-seller-btn">
+          <i class="fa-solid fa-id-badge" aria-hidden="true"></i>
+          <span id="header-seller-name">...</span>
+          <i class="fa-solid fa-ellipsis-vertical pv-seller-more" aria-hidden="true"></i>
         </button>
-        <!-- Injected via JS -->
       </div>
+    </div>
 
+    <!-- Menú móvil -->
+    <div id="app-menu" class="hidden" role="menu" aria-label="Menú del vendedor">
+      <div id="menu-sync-info" class="pv-menu-sync-info" aria-live="polite">
+        <i class="fa-regular fa-clock" aria-hidden="true"></i>
+        <span id="menu-sync-text">Ruta local activa</span>
+      </div>
+      <button id="menu-install" type="button" onclick="installPWA()" class="hidden pv-menu-item is-install" role="menuitem">
+        <i class="fa-solid fa-download" aria-hidden="true"></i>
+        <span>Instalar app</span>
+      </button>
+      <button type="button" onclick="openClientModal();toggleMenu(true)" class="pv-menu-item" role="menuitem">
+        <i class="fa-solid fa-store" aria-hidden="true"></i>
+        <span>Cambiar cliente</span>
+      </button>
+      <button type="button" onclick="reloadCatalogData();toggleMenu(true)" class="pv-menu-item" role="menuitem">
+        <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i>
+        <span>Actualizar catálogo</span>
+      </button>
+      <button type="button" onclick="openConfigModal();toggleMenu(true)" class="pv-menu-item" role="menuitem">
+        <i class="fa-solid fa-gear" aria-hidden="true"></i>
+        <span>Configuración</span>
+      </button>
+      <button type="button" onclick="clearPreventaCache()" class="pv-menu-item" role="menuitem">
+        <i class="fa-solid fa-trash-can" aria-hidden="true"></i>
+        <span>Borrar caché</span>
+      </button>
+      <div class="pv-menu-sep" role="separator"></div>
+      <button type="button" onclick="logoutVendedor()" class="pv-menu-item is-danger" role="menuitem">
+        <i class="fa-solid fa-right-from-bracket" aria-hidden="true"></i>
+        <span>Cerrar sesión</span>
+      </button>
     </div>
   </header>
 
-  <!-- Main Catalog Grid Area -->
-  <main class="max-w-7xl mx-auto px-3 sm:px-6 pt-4 pb-10 flex-1 w-full" style="padding-bottom: calc(2.5rem + env(safe-area-inset-bottom));">
-    
-    <!-- Empty / Notification State -->
-    <div id="catalog-empty-state" class="hidden text-center py-16 px-4 bg-white rounded-3xl border border-slate-200 max-w-md mx-auto my-8">
-      <div class="w-16 h-16 rounded-2xl bg-amber-50 text-amber-500 flex items-center justify-center text-2xl mx-auto mb-3">
-        <i class="fa-solid fa-box-open"></i>
+  <main class="pv-main">
+    <h1 class="sr-only">Catálogo de preventa</h1>
+
+    <!-- Cliente y filtros -->
+    <section class="pv-context" aria-label="Cliente y filtros del catálogo">
+      <button type="button" class="pv-client-card" onclick="openClientModal()" aria-haspopup="dialog">
+        <span class="pv-client-label">Cliente actual</span>
+        <span class="pv-client-row">
+          <span id="header-client-name" class="pv-client-name">Seleccionar cliente</span>
+          <span class="pv-client-chevron" aria-hidden="true"><i class="fa-solid fa-chevron-down"></i></span>
+        </span>
+        <span class="pv-client-meta">
+          <span class="pv-client-code">#<span id="header-client-code">—</span></span>
+          <span id="header-client-list-badge" class="pv-client-list-badge">L1</span>
+        </span>
+        <span class="pv-client-foot">
+          <span class="pv-client-doc"><i class="fa-regular fa-id-card" aria-hidden="true"></i> <span id="header-client-doc">—</span></span>
+          <span id="header-client-discount-wrap" class="pv-client-discount">Dto. base <b id="header-client-discount">0%</b></span>
+        </span>
+      </button>
+
+      <div class="pv-tools">
+        <div class="pv-search">
+          <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
+          <input type="text" id="catalog-search-input" oninput="applyFilters()" placeholder="Buscar por nombre, código o barras…" autocomplete="off" aria-label="Buscar producto">
+          <button id="btn-clear-search" type="button" onclick="clearSearch()" class="hidden pv-search-clear" aria-label="Limpiar búsqueda">
+            <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+          </button>
+          <button id="btn-scan-barcode" type="button" onclick="openBarcodeScanner()" class="pv-search-scan" aria-label="Escanear código de barras con la cámara" title="Escanear código con la cámara">
+            <i class="fa-solid fa-barcode" aria-hidden="true"></i>
+          </button>
+        </div>
+
+        <div class="pv-filter-group">
+          <span class="pv-filter-label" id="supplier-filter-label">Proveedor</span>
+          <div id="supplier-chips-container" class="pv-chips" role="group" aria-labelledby="supplier-filter-label"></div>
+        </div>
+
+        <div class="pv-filter-group">
+          <span class="pv-filter-label" id="category-filter-label">Categoría</span>
+          <div id="category-chips-container" class="pv-chips" role="group" aria-labelledby="category-filter-label"></div>
+        </div>
       </div>
-      <h3 class="text-base font-bold text-slate-900 mb-1">Sin productos disponibles</h3>
-      <p id="empty-state-message" class="text-xs text-slate-500 leading-relaxed">
-        No hay productos para mostrar en la lista de este cliente.
-      </p>
-    </div>
+    </section>
 
-    <!-- Products Grid -->
-    <div id="products-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
-      <!-- Injected via JS -->
-    </div>
+    <!-- Catálogo -->
+    <section class="pv-catalog" aria-labelledby="catalog-title">
+      <div class="pv-section-head">
+        <div>
+          <h2 id="catalog-title">Productos de tu ruta</h2>
+          <p>Precios con IVA incluido · Toca la foto para ampliar</p>
+        </div>
+        <span id="catalog-counter" class="pv-count" aria-live="polite"></span>
+      </div>
 
+      <div id="catalog-empty-state" class="hidden pv-empty">
+        <div class="pv-empty-icon"><i class="fa-solid fa-box-open" aria-hidden="true"></i></div>
+        <div class="pv-empty-copy">
+          <h3>Sin productos disponibles</h3>
+          <p id="empty-state-message">No hay productos para mostrar en la lista de este cliente.</p>
+        </div>
+      </div>
+
+      <div id="products-grid" class="pv-grid"></div>
+    </section>
   </main>
 
-  <!-- Login Vendedor (bloquea la app hasta validar en el Sheet) -->
-  <div id="login-overlay" class="fixed inset-0 z-[60] bg-slate-900/95 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
-    <div class="bg-white rounded-2xl w-full max-w-sm p-6 shadow-2xl my-auto">
-      <div class="text-center mb-4">
-        <img id="login-logo" src="./logo.png" onerror="brandLogoFallback(this)" alt="Logo empresa" class="w-20 h-20 rounded-full object-cover mx-auto mb-2 shadow-md">
-        <p id="login-company-name" class="text-sm font-extrabold text-slate-900">Distribuciones Castro</p>
-        <h2 class="text-base font-extrabold text-slate-900 mt-1">Acceso Vendedor</h2>
-        <p class="text-xs text-slate-500">Ingresa con tu código de vendedor</p>
+  <!-- Acceso vendedor -->
+  <div id="login-overlay" class="pv-login hidden" role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <div class="pv-login-card">
+      <div class="pv-login-brand">
+        <img id="login-logo" src="./logo.png" onerror="brandLogoFallback(this)" alt="Logo empresa" class="pv-login-logo">
+        <p id="login-company-name" class="pv-login-company">Distribuciones Castro</p>
       </div>
-      <!-- Paso 1: credenciales -->
-      <div id="login-step-1" class="space-y-3">
-        <div>
-          <label class="block text-xs font-semibold text-slate-700 mb-1">Código de vendedor o usuario</label>
-          <input type="text" id="login-code" autocomplete="username" placeholder="Ej: V001" class="w-full px-3.5 py-2.5 text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+      <h2 id="login-title" class="pv-login-title">Acceso vendedor</h2>
+      <p class="pv-login-sub">Ingresa con tu código para cargar tu ruta, tus listas y tus precios.</p>
+
+      <div id="login-step-1" class="pv-login-step">
+        <div class="pv-field">
+          <label for="login-code">Código de vendedor o usuario</label>
+          <input type="text" id="login-code" autocomplete="username" autocapitalize="characters" spellcheck="false" placeholder="Ej: V001" class="pv-input">
         </div>
-        <div>
-          <label class="block text-xs font-semibold text-slate-700 mb-1">Contraseña</label>
-          <input type="password" id="login-password" autocomplete="current-password" placeholder="••••••••" class="w-full px-3.5 py-2.5 text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <div class="pv-field">
+          <label for="login-password">Contraseña</label>
+          <input type="password" id="login-password" autocomplete="current-password" placeholder="••••••••" class="pv-input">
         </div>
-        <p id="login-error" class="hidden text-xs text-rose-600 font-medium"></p>
-        <button onclick="loginVendedor()" id="btn-login" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl transition flex items-center justify-center gap-2">
-          <i class="fa-solid fa-right-to-bracket"></i>
+        <p id="login-error" class="hidden pv-error" role="alert"></p>
+        <button type="button" onclick="loginVendedor()" id="btn-login" class="pv-btn pv-btn-primary pv-btn-block">
+          <i class="fa-solid fa-right-to-bracket" aria-hidden="true"></i>
           <span>Ingresar</span>
         </button>
-        <div id="login-sheets-wrap" class="hidden pt-1">
-          <label class="block text-[10px] font-semibold text-slate-500 mb-1">URL del sistema (solo si se solicita)</label>
-          <input type="text" id="login-sheets-url" placeholder="https://script.google.com/macros/s/.../exec" class="w-full px-3 py-2 text-[11px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <div id="login-sheets-wrap" class="hidden pv-field">
+          <label for="login-sheets-url">URL del sistema (Google Sheets)</label>
+          <input type="text" id="login-sheets-url" placeholder="https://script.google.com/macros/s/.../exec" class="pv-input pv-input-sm">
+        </div>
+        <div class="pv-login-tools" style="text-align:center;margin-top:6px;">
+          <button type="button" onclick="openConfigModal()" class="pv-link-sm" style="background:none;border:none;color:var(--muted);font-size:11px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;padding:3px 6px;">
+            <i class="fa-solid fa-gear" aria-hidden="true"></i>
+            <span>Configurar URL del sistema</span>
+          </button>
         </div>
       </div>
-      <!-- Paso 2: decidir si actualizar la ruta o usar caché -->
-      <div id="login-step-2" class="hidden space-y-3">
-        <p class="text-sm text-slate-700 text-center">Hola, <strong id="login-seller-name">vendedor</strong></p>
-        <p id="login-cache-info" class="text-[11px] text-slate-500 text-center"></p>
-        <p id="login-route-error" class="hidden text-xs text-rose-600 font-medium text-center"></p>
-        <button onclick="confirmDownloadRoute()" id="btn-download-route" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl transition flex items-center justify-center gap-2">
-          <i class="fa-solid fa-cloud-arrow-down"></i>
+
+      <div id="login-step-2" class="hidden pv-login-step">
+        <p class="pv-login-hello">Hola, <strong id="login-seller-name">vendedor</strong></p>
+        <p id="login-cache-info" class="pv-login-cache"></p>
+        <p id="login-route-error" class="hidden pv-error" role="alert"></p>
+        <button type="button" onclick="confirmDownloadRoute()" id="btn-download-route" class="pv-btn pv-btn-primary pv-btn-block">
+          <i class="fa-solid fa-cloud-arrow-down" aria-hidden="true"></i>
           <span>Sí, actualizar mi ruta</span>
         </button>
-        <button onclick="useCachedRoute()" id="btn-offline-route" class="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-bold rounded-xl transition flex items-center justify-center gap-2">
-          <i class="fa-solid fa-box-archive"></i>
+        <button type="button" onclick="useCachedRoute()" id="btn-offline-route" class="pv-btn pv-btn-secondary pv-btn-block">
+          <i class="fa-solid fa-box-archive" aria-hidden="true"></i>
           <span>No, usar datos guardados</span>
         </button>
       </div>
+
+      <p class="pv-login-note">El primer ingreso guarda tus credenciales en este equipo. Después funciona 100% sin conexión con tu catálogo en caché.</p>
     </div>
   </div>
 
-  <!-- Config Modal (conexión Sheet) -->
-  <div id="config-modal" class="hidden fixed inset-0 z-[70] bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4">
-    <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md max-h-[92dvh] overflow-y-auto shadow-2xl">
-      <div class="p-4 border-b border-slate-100 flex items-center justify-between">
+  <!-- Configuración -->
+  <div id="config-modal" class="hidden pv-overlay" onclick="if(event.target===this)closeConfigModal()">
+    <div class="pv-sheet pv-sheet-sm" role="dialog" aria-modal="true" aria-labelledby="config-title">
+      <div class="pv-sheet-head">
         <div>
-          <h3 class="text-sm font-bold text-slate-900">Configuración</h3>
-          <p class="text-xs text-slate-500">Dirección del Google Sheet de este equipo</p>
+          <h3 id="config-title">Configuración</h3>
+          <p>Dirección del Google Sheet de este equipo</p>
         </div>
-        <button onclick="closeConfigModal()" class="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-600 flex items-center justify-center">
-          <i class="fa-solid fa-xmark text-sm"></i>
+        <button type="button" onclick="closeConfigModal()" class="pv-sheet-close" aria-label="Cerrar configuración">
+          <i class="fa-solid fa-xmark" aria-hidden="true"></i>
         </button>
       </div>
-      <div class="p-4 space-y-3">
-        <div>
-          <label class="block text-xs font-semibold text-slate-700 mb-1">URL de la Aplicación Web (Apps Script)</label>
-          <input type="text" id="config-sheets-url" placeholder="https://script.google.com/macros/s/.../exec" class="w-full px-3.5 py-2.5 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <div class="pv-sheet-body">
+        <div class="pv-field">
+          <label for="config-sheets-url">URL de la aplicación web (Apps Script)</label>
+          <input type="text" id="config-sheets-url" placeholder="https://script.google.com/macros/s/.../exec" class="pv-input pv-input-sm">
         </div>
-        <p id="config-status" class="hidden text-xs font-medium"></p>
-        <div class="flex gap-2">
-          <button onclick="testSheetsConnection()" id="btn-test-sheets" class="flex-1 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5">
-            <i class="fa-solid fa-plug"></i>
+        <p id="config-status" class="hidden pv-status" role="status" aria-live="polite"></p>
+        <div class="pv-btn-row">
+          <button type="button" onclick="testSheetsConnection()" id="btn-test-sheets" class="pv-btn pv-btn-secondary">
+            <i class="fa-solid fa-plug" aria-hidden="true"></i>
             <span>Probar</span>
           </button>
-          <button onclick="saveSheetsUrl()" class="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5">
-            <i class="fa-solid fa-floppy-disk"></i>
+          <button type="button" onclick="saveSheetsUrl()" id="btn-save-sheets" class="pv-btn pv-btn-primary">
+            <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i>
             <span>Guardar</span>
           </button>
         </div>
-        <p class="text-[11px] text-slate-400">Sesión: <span id="config-seller-info" class="font-medium text-slate-600">—</span></p>
-        <p class="text-[11px] text-slate-400">Ruta guardada: <span id="config-route-info" class="font-medium text-slate-600">—</span></p>
+        <div class="pv-config-meta">
+          <p>Sesión: <span id="config-seller-info">—</span></p>
+          <p>Ruta guardada: <span id="config-route-info">—</span></p>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Toast de descarga (alerta de proceso) -->
-  <div id="dl-toast" class="hidden fixed left-1/2 -translate-x-1/2 bottom-6 z-[65] bg-slate-900 text-white text-xs font-semibold px-4 py-2.5 rounded-full shadow-xl flex items-center gap-2" style="margin-bottom: env(safe-area-inset-bottom);">
-    <i id="dl-toast-icon" class="fa-solid fa-spinner fa-spin"></i>
+  <!-- Aviso de descarga -->
+  <div id="dl-toast" class="hidden pv-toast" role="status" aria-live="polite">
+    <i id="dl-toast-icon" class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>
     <span id="dl-toast-msg">Descargando...</span>
   </div>
 
-  <!-- Client Selection Modal -->
-  <div id="client-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4">
-    <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-lg max-h-[92dvh] sm:max-h-[85vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-      
-      <!-- Modal Header -->
-      <div class="p-4 border-b border-slate-100 flex items-center justify-between">
+  <!-- Selección de cliente -->
+  <div id="client-modal" class="hidden pv-overlay" onclick="if(event.target===this)closeClientModal()">
+    <div class="pv-sheet pv-sheet-lg" role="dialog" aria-modal="true" aria-labelledby="client-title">
+      <div class="pv-sheet-head">
         <div>
-          <h3 class="text-sm font-bold text-slate-900">Seleccionar Cliente de la Ruta</h3>
-          <p class="text-xs text-slate-500">El catálogo se adaptará a su lista de precios y descuentos</p>
+          <h3 id="client-title">Clientes de tu ruta</h3>
+          <p>Elige el cliente para ajustar listas y descuentos</p>
         </div>
-        <button onclick="closeClientModal()" class="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-600 flex items-center justify-center">
-          <i class="fa-solid fa-xmark text-sm"></i>
+        <button type="button" onclick="closeClientModal()" class="pv-sheet-close" aria-label="Cerrar clientes">
+          <i class="fa-solid fa-xmark" aria-hidden="true"></i>
         </button>
       </div>
 
-      <!-- Search Input -->
-      <div class="p-3 border-b border-slate-100 bg-slate-50">
-        <div class="relative">
-          <i class="fa-solid fa-magnifying-glass absolute left-3 top-3 text-slate-400 text-xs"></i>
-          <input type="text" id="modal-client-search" oninput="renderClientModalList()" placeholder="Buscar por nombre, código o cédula..." class="w-full pl-9 pr-3 py-2 text-xs rounded-xl bg-white border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <div class="pv-sheet-search">
+        <div class="pv-search pv-search-sm">
+          <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
+          <input type="text" id="modal-client-search" oninput="renderClientModalList()" placeholder="Buscar por nombre, código o cédula…" autocomplete="off" aria-label="Buscar cliente">
         </div>
       </div>
 
-      <!-- Clients List -->
-      <div id="modal-clients-list" class="divide-y divide-slate-100 overflow-y-auto flex-1 p-2">
-        <!-- Injected via JS -->
-      </div>
-
+      <div id="modal-clients-list" class="pv-client-list"></div>
     </div>
   </div>
 
-  <!-- High Definition Image Lightbox (Zoom Modal) -->
-  <div id="zoom-modal" class="hidden fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-between p-3 sm:p-6 backdrop-blur-md">
-    
-    <!-- Top Modal Bar -->
-    <div class="w-full max-w-4xl flex items-center justify-between text-white pb-3 border-b border-white/10">
-      <div class="truncate mr-4">
-        <span id="zoom-product-code" class="text-xs font-mono font-bold text-blue-400">#000</span>
-        <h3 id="zoom-product-title" class="text-sm sm:text-base font-bold text-white truncate">Nombre del Producto</h3>
+  <!-- Foto en alta definición -->
+  <div id="zoom-modal" class="hidden pv-zoom" role="dialog" aria-modal="true" aria-label="Foto del producto">
+    <div class="pv-zoom-top">
+      <div class="pv-zoom-copy">
+        <span id="zoom-product-code" class="pv-zoom-code">#000</span>
+        <h3 id="zoom-product-title" class="pv-zoom-title">Nombre del producto</h3>
       </div>
-      <div class="flex items-center gap-2">
-        <!-- Zoom controls -->
-        <button onclick="zoomIn()" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center text-xs">
-          <i class="fa-solid fa-magnifying-glass-plus"></i>
+      <div class="pv-zoom-actions">
+        <button type="button" onclick="zoomIn()" class="pv-zoom-btn" aria-label="Acercar">
+          <i class="fa-solid fa-magnifying-glass-plus" aria-hidden="true"></i>
         </button>
-        <button onclick="zoomOut()" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center text-xs">
-          <i class="fa-solid fa-magnifying-glass-minus"></i>
+        <button type="button" onclick="zoomOut()" class="pv-zoom-btn" aria-label="Alejar">
+          <i class="fa-solid fa-magnifying-glass-minus" aria-hidden="true"></i>
         </button>
-        <button onclick="resetZoom()" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center text-xs">
-          <i class="fa-solid fa-rotate-left"></i>
+        <button type="button" onclick="resetZoom()" class="pv-zoom-btn" aria-label="Restablecer zoom">
+          <i class="fa-solid fa-rotate-left" aria-hidden="true"></i>
         </button>
-        <button onclick="closeZoomModal()" class="w-8 h-8 rounded-lg bg-white/20 hover:bg-red-600 text-white flex items-center justify-center text-sm ml-2">
-          <i class="fa-solid fa-xmark"></i>
+        <button type="button" onclick="closeZoomModal()" class="pv-zoom-btn is-close" aria-label="Cerrar foto">
+          <i class="fa-solid fa-xmark" aria-hidden="true"></i>
         </button>
       </div>
     </div>
 
-    <!-- Zoomable Image Viewport -->
-    <div class="zoom-container flex-1 w-full max-w-4xl flex items-center justify-center py-4">
-      <img id="modal-image" src="" alt="Producto HD" class="max-h-[60vh] sm:max-h-[65vh] max-w-full object-contain drop-shadow-2xl">
+    <div class="zoom-container pv-zoom-stage">
+      <img id="modal-image" src="./logo.png" alt="Producto en alta definición" class="pv-zoom-image">
     </div>
 
-    <!-- Bottom Product Specs Drawer -->
-    <div class="w-full max-w-4xl bg-slate-900/90 border border-white/10 rounded-2xl p-4 text-white">
-      <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
-        <div>
-          <span class="text-slate-400 block text-[10px] uppercase font-semibold">Código CABYS</span>
-          <span id="zoom-cabys-badge" class="font-mono font-medium text-slate-200">3413100000000</span>
-        </div>
-        <div>
-          <span class="text-slate-400 block text-[10px] uppercase font-semibold">Tasa IVA</span>
-          <span id="zoom-iva-badge" class="font-bold text-slate-200">13%</span>
-        </div>
-        <div class="text-right">
-          <span class="text-slate-400 block text-[10px] uppercase font-semibold">Precio Asignado Cliente</span>
-          <span id="zoom-price-badge" class="font-extrabold text-sm sm:text-base text-emerald-400">₡ 0.00</span>
-        </div>
+    <div class="pv-zoom-specs">
+      <div id="zoom-barcode-spec" class="pv-spec hidden">
+        <span class="pv-spec-label">Código de barras</span>
+        <span id="zoom-barcode-badge" class="pv-spec-value pv-spec-mono"></span>
+      </div>
+      <div class="pv-spec">
+        <span class="pv-spec-label">Código CABYS</span>
+        <span id="zoom-cabys-badge" class="pv-spec-value">3413100000000</span>
+      </div>
+      <div class="pv-spec">
+        <span class="pv-spec-label">Tasa IVA</span>
+        <span id="zoom-iva-badge" class="pv-spec-value">13%</span>
+      </div>
+      <div class="pv-spec is-price">
+        <span class="pv-spec-label">Precio asignado al cliente</span>
+        <span id="zoom-price-badge" class="pv-spec-value is-price">₡ 0</span>
       </div>
     </div>
-
   </div>
 
-  <!-- Scripts -->
-  <script src="app.js?v=4.0"></script>
+  <!-- Modal Escáner de Código de Barras -->
+  <div id="barcode-scanner-modal" class="hidden pv-overlay" role="dialog" aria-modal="true" aria-labelledby="scanner-title">
+    <div class="pv-scanner-card">
+      <div class="pv-scanner-head">
+        <div class="pv-scanner-title-box">
+          <i class="fa-solid fa-barcode" aria-hidden="true"></i>
+          <div>
+            <h3 id="scanner-title">Escanear código de barras</h3>
+            <p>Apunta la cámara al código de barra o QR</p>
+          </div>
+        </div>
+        <div class="pv-scanner-actions">
+          <button type="button" id="btn-scanner-torch" onclick="toggleScannerTorch()" class="hidden pv-scanner-btn" aria-label="Linterna" title="Encender linterna">
+            <i class="fa-solid fa-bolt" aria-hidden="true"></i>
+          </button>
+          <button type="button" id="btn-scanner-switch" onclick="switchScannerCamera()" class="hidden pv-scanner-btn" aria-label="Cambiar cámara" title="Cambiar cámara">
+            <i class="fa-solid fa-camera-rotate" aria-hidden="true"></i>
+          </button>
+          <button type="button" onclick="closeBarcodeScanner()" class="pv-scanner-btn pv-scanner-btn-close" aria-label="Cerrar escáner">
+            <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+          </button>
+        </div>
+      </div>
+
+      <div class="pv-scanner-stage">
+        <div id="barcode-scanner-viewport" class="pv-scanner-viewport"></div>
+        <div class="pv-scanner-guide" aria-hidden="true">
+          <div class="pv-scanner-laser"></div>
+          <span class="pv-scanner-corner pv-corner-tl"></span>
+          <span class="pv-scanner-corner pv-corner-tr"></span>
+          <span class="pv-scanner-corner pv-corner-bl"></span>
+          <span class="pv-scanner-corner pv-corner-br"></span>
+        </div>
+      </div>
+
+      <div class="pv-scanner-foot">
+        <p id="scanner-status" class="pv-scanner-status">Buscando código de barra...</p>
+        <button type="button" onclick="closeBarcodeScanner()" class="pv-btn pv-btn-secondary pv-btn-sm">
+          Cancelar
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="html5-qrcode.min.js"></script>
+  <script src="bundle_data.js?v=5.9"></script>
+  <script src="app.js?v=5.9"></script>
 </body>
 </html>
