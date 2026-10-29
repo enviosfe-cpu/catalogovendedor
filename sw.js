@@ -1,12 +1,12 @@
 /**
- * Distribuciones Castro Preventa - Service Worker for 100% Offline App
- * Modo Offline Total: Shell + datos + CDNs + fotos vistas en caché local.
- * Carga instantánea sin esperas de red en cada apertura.
+ * Catálogo Cliente - Service Worker
+ * 100% Offline: Shell, datos base, estilos, CDNs y fotos en caché local.
  */
-const CACHE_NAME = 'castro-preventa-v3.0';
+const CACHE_NAME = 'cat-cliente-v3-v1.0';
 const ASSETS_TO_CACHE = [
   './index.html',
   './styles.css',
+  './config.js',
   './app.js',
   './manifest.json',
   './logo.png',
@@ -46,7 +46,7 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(req.url);
 
-  // Fotos de productos: cache-first
+  // Imágenes: Cache-first
   if (req.destination === 'image') {
     event.respondWith(
       caches.match(req).then((hit) => {
@@ -63,7 +63,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // CDNs externos (Tailwind, FontAwesome, Fuentes): Cache-first
+  // CDNs externos (Tailwind, FontAwesome, Google Fonts): Cache-first
   if (url.origin.includes('cdn.tailwindcss.com') ||
       url.origin.includes('cdnjs.cloudflare.com') ||
       url.origin.includes('fonts.googleapis.com') ||
@@ -83,24 +83,24 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Navegación, scripts locales y estilos: Cache-first con actualización en background
+  // Scripts, estilos y documentos locales: Cache-first con actualización
   event.respondWith(
     caches.match(req).then((cached) => {
       if (cached) {
-        // En background actualizamos el asset si hay red sin demorar la app
-        fetch(req).then((netRes) => {
-          if (netRes && netRes.status === 200) {
-            caches.open(CACHE_NAME).then((cache) => cache.put(req, netRes));
+        // En background actualizamos el caché si hay red
+        fetch(req).then((networkRes) => {
+          if (networkRes && networkRes.status === 200) {
+            caches.open(CACHE_NAME).then((cache) => cache.put(req, networkRes));
           }
         }).catch(() => {});
         return cached;
       }
-      return fetch(req).then((netRes) => {
-        if (netRes && netRes.status === 200) {
-          const copy = netRes.clone();
+      return fetch(req).then((networkRes) => {
+        if (networkRes && networkRes.status === 200) {
+          const copy = networkRes.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
         }
-        return netRes;
+        return networkRes;
       }).catch(() => {
         if (req.mode === 'navigate') {
           return caches.match('./index.html');
