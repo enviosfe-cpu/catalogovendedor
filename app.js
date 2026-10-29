@@ -367,32 +367,66 @@ function restoreVendorCache() {
 }
 
 /**
- * Descarga el catálogo propio del vendedor vía Sheet (action=fetch&v=).
- * El Sheet usa el link api_<tipo>_<VENDEDOR> con su usuario=, o el genérico.
+ * Descarga los datos del vendedor directamente desde el Google Sheet (Snapshot).
+ * NO consulta el ERP en vivo desde la app de preventa.
+ * El ERP se descarga exclusivamente desde el Portal Administrativo.
  */
-async function fetchVendorType(type, vendor, liveOnly) {
-  // Vía rápida: instantánea del Sheet (24h) salvo que se pida en vivo
-  if (!liveOnly) {
-    try {
-      const res = await fetch(`${state.sheetsUrl}?action=snapshot&type=${type}&v=${encodeURIComponent(vendor)}&maxAge=24`);
-      const json = await res.json();
-      if (json.status === "success" && json.snapshot && json.snapshot.fresh && Array.isArray(json.snapshot.items)) {
-        console.log(`[snapshot] ${type}: ${json.snapshot.items.length} registros frescos.`);
-        return json.snapshot.items;
-      }
-    } catch (e) {}
-  }
-  const res = await fetch(`${state.sheetsUrl}?action=fetch&type=${type}&v=${encodeURIComponent(vendor)}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+async function fetchVendorType(type, vendor) {
+  const ven = String(vendor || "").trim().toUpperCase();
+  const res = await fetch(`${state.sheetsUrl}?action=snapshot&type=${type}&v=${encodeURIComponent(ven)}&maxAge=0`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} al consultar ${type} en Google Sheets`);
   const json = await res.json();
-  if (json.status !== "success" || !Array.isArray(json.items)) {
-    throw new Error((json && json.message) || "Respuesta inválida del Sheet");
+  if (json.status !== "success" || !json.snapshot || !Array.isArray(json.snapshot.items)) {
+    throw new Error((json && json.message) || `Respuesta inválida de Google Sheets para ${type}`);
   }
-  return json.items;
+  return json.snapshot.items;
 }
 
 async function downloadVendorCatalog(vendor, onProgress) {
-  // Secuencial con reintentos: evita saturar al Sheet y no trunca a la primera falla
+  const v = String(vendor || "").trim().toUpperCase();
+  const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
+
+  // 1. Intento rápido vía lote completo de instantáneas de Google Sheets (1 sola petición rápida, ~3-4 segundos)
+  try {
+    if (onProgress) onProgress("products", 1);
+    const allRes = await fetch(`${state.sheetsUrl}?action=snapshot_all&v=${encodeURIComponent(v)}`);
+    if (allRes.ok) {
+      const allJson = await allRes.json();
+      if (allJson.status === "success" && allJson.data) {
+        const vendorData = (allJson.data.vendors && allJson.data.vendors[v]) || allJson.data[v] || {};
+        const products = vendorData.products || [];
+        const clients = vendorData.clients || [];
+        if (products.length > 0 && clients.length > 0) {
+          const discounts = vendorData.discounts || [];
+          const cabysMap = (vendorData.cabysMap && Object.keys(vendorData.cabysMap).length) ? vendorData.cabysMap : (allJson.data.cabysMap || {});
+
+          // Maestros de Google Sheets
+          let maestros = null;
+          try {
+            const mRes = await fetch(`${state.sheetsUrl}?action=get_maestros`);
+            const mJson = await mRes.json();
+            if (mJson.status === "success" && mJson.maestros) {
+              maestros = { proveedores: mJson.maestros.proveedores || {}, categorias: mJson.maestros.categorias || {} };
+            }
+          } catch (e) {}
+
+          // Fotos de Google Sheets
+          let images = null;
+          try {
+            const iRes = await fetch(`${state.sheetsUrl}?action=get_images`);
+            const iJson = await iRes.json();
+            if (iJson.status === "success" && iJson.images) images = iJson.images;
+          } catch (e) {}
+
+          return { products, clients, discounts, cabysMap, maestros, images };
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[downloadVendorCatalog] Lote rápido falló, intentando individual por Sheet...", e);
+  }
+
+  // 2. Respaldo individual por tipo (consultando única y exclusivamente Google Sheets, NUNCA el ERP)
   const order = ["products", "clients", "discounts", "cabys"];
   const got = {};
   for (const t of order) {
@@ -400,24 +434,24 @@ async function downloadVendorCatalog(vendor, onProgress) {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         if (onProgress) onProgress(t, attempt);
-        got[t] = await fetchVendorType(t, vendor);
+        got[t] = await fetchVendorType(t, v);
         lastErr = null;
         break;
       } catch (e) {
         lastErr = e;
-        await new Promise(r => setTimeout(r, 1200 * attempt));
+        await new Promise(r => setTimeout(r, 800 * attempt));
       }
     }
     if (lastErr) {
       if (t === "cabys") {
-        console.warn(`[downloadVendorCatalog] CABYS no disponible en vivo (${lastErr.message}), usando respaldo.`);
+        console.warn(`[downloadVendorCatalog] CABYS no disponible en Sheet (${lastErr.message}), usando respaldo.`);
         try {
           got["cabys"] = await fetchVendorType("cabys", "3");
         } catch (e2) {
           got["cabys"] = Object.values(state.cabysMap || {});
         }
       } else if (t === "discounts") {
-        console.warn(`[downloadVendorCatalog] Descuentos no disponible en vivo (${lastErr.message}), usando respaldo.`);
+        console.warn(`[downloadVendorCatalog] Descuentos no disponible en Sheet (${lastErr.message}), usando respaldo.`);
         got["discounts"] = state.discounts || [];
       } else {
         throw new Error(`${t}: ${lastErr.message}`);
@@ -426,7 +460,8 @@ async function downloadVendorCatalog(vendor, onProgress) {
   }
   const cabysMap = {};
   (got.cabys || []).forEach(c => { if (c && c.pro_codecom) cabysMap[String(c.pro_codecom).trim()] = c; });
-  // Maestros de proveedor y categorías junto con la ruta (para chips y nombres offline)
+
+  // Maestros de proveedor y categorías directo del Sheet
   let maestros = null;
   if (onProgress) onProgress("maestros", 1);
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -442,10 +477,11 @@ async function downloadVendorCatalog(vendor, onProgress) {
       break;
     } catch (e) {
       if (attempt === 2) console.warn("maestros ruta:", e);
-      await new Promise(r => setTimeout(r, 1200 * attempt));
+      await new Promise(r => setTimeout(r, 800 * attempt));
     }
   }
-  // Fotos de la hoja Imagenes (mismo GS): también son parte de la ruta
+
+  // Fotos de la hoja Imagenes de Google Sheets
   let images = null;
   if (onProgress) onProgress("fotos", 1);
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -455,10 +491,18 @@ async function downloadVendorCatalog(vendor, onProgress) {
       if (json.status === "success" && json.images) { images = json.images; break; }
     } catch (e) {
       if (attempt === 2) console.warn("fotos ruta:", e);
-      await new Promise(r => setTimeout(r, 1200 * attempt));
+      await new Promise(r => setTimeout(r, 800 * attempt));
     }
   }
-  return { products: got.products, clients: got.clients, discounts: got.discounts, cabysMap, maestros, images };
+
+  return {
+    products: got.products || [],
+    clients: got.clients || [],
+    discounts: got.discounts || [],
+    cabysMap,
+    maestros,
+    images
+  };
 }
 
 function getVendorCache(vendor) {
