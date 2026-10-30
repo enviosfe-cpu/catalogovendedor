@@ -1932,6 +1932,88 @@ function selectClientFromModal(clientCode) {
 }
 
 /**
+ * Sincroniza todos los vendedores y el catálogo general desde Google Sheets (snapshot_all).
+ * Se utiliza al guardar la URL en configuración o cuando no hay sesión activa aún.
+ */
+async function syncAllVendorsFromSheets(onProgress) {
+  if (!navigator.onLine || !state.sheetsUrl) return null;
+  const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
+
+  if (onProgress) onProgress("products");
+  const res = await fetch(`${state.sheetsUrl}?action=snapshot_all&v=`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  if (json.status !== "success" || !json.data) throw new Error((json && json.message) || "Error al descargar catálogo");
+
+  const nowIso = new Date().toISOString();
+  const vendorsMap = json.data.vendors || {};
+  const globalCabys = json.data.cabysMap || {};
+
+  // Descargar maestros de Google Sheets
+  if (onProgress) onProgress("maestros");
+  let maestros = null;
+  try {
+    const mRes = await fetch(`${state.sheetsUrl}?action=get_maestros`);
+    const mJson = await mRes.json();
+    if (mJson.status === "success" && mJson.maestros) {
+      maestros = { proveedores: mJson.maestros.proveedores || {}, categorias: mJson.maestros.categorias || {} };
+      state.maestros = maestros;
+      try { localStorage.setItem('ecomdx_maestros', JSON.stringify(maestros)); } catch (e) {}
+    }
+  } catch (e) {}
+
+  // Descargar imágenes de Google Sheets
+  if (onProgress) onProgress("fotos");
+  let images = null;
+  try {
+    const iRes = await fetch(`${state.sheetsUrl}?action=get_images`);
+    const iJson = await iRes.json();
+    if (iJson.status === "success" && iJson.images) {
+      images = iJson.images;
+      state.images = { ...(state.images || {}), ...images };
+      try { localStorage.setItem('ecomdx_images', JSON.stringify(state.images)); } catch (e) {}
+    }
+  } catch (e) {}
+
+  // Guardar en IndexedDB la ruta de cada vendedor encontrado
+  let primaryVendorCat = null;
+  for (const [vCode, vData] of Object.entries(vendorsMap)) {
+    const vProducts = vData.products || [];
+    const vClients = vData.clients || [];
+    const vDiscounts = vData.discounts || [];
+    const vCabys = (vData.cabysMap && Object.keys(vData.cabysMap).length) ? vData.cabysMap : globalCabys;
+
+    const payload = {
+      vendor: vCode,
+      ts: nowIso,
+      catalog: {
+        products: vProducts,
+        clients: vClients,
+        discounts: vDiscounts,
+        cabysMap: vCabys,
+        maestros: maestros || state.maestros,
+        images: images || state.images,
+        ts: nowIso
+      }
+    };
+
+    await idbSet(`vendor_catalog_${vCode}`, payload);
+    if (!primaryVendorCat || (state.vendedor && state.vendedor.codigo === vCode)) {
+      primaryVendorCat = payload.catalog;
+    }
+  }
+
+  // Catálogo publicado global en IndexedDB
+  if (primaryVendorCat) {
+    await idbSet('vendor_catalog', { vendor: '', ts: nowIso, catalog: primaryVendorCat });
+    await idbSet('published_catalog', { vendor: '', ts: nowIso, catalog: primaryVendorCat });
+    applyLoadedData(primaryVendorCat);
+  }
+
+  return primaryVendorCat;
+}
+
+/**
  * Configuración: dirección del Sheet en este equipo (no se borra con la caché).
  */
 function openConfigModal() {
@@ -1943,13 +2025,17 @@ function openConfigModal() {
   if (route) {
     try {
       const vCode = state.vendedor ? state.vendedor.codigo : '';
-      const cached = getVendorCache(vCode);
-      if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
-        const n = cached.products.length;
-        const ts = cached.ts ? new Date(cached.ts).toLocaleString() : 'guardada';
-        route.textContent = `${vCode || 'Vendedor'} • ${ts} • ${n} prod.`;
+      const prodCount = state.products ? state.products.length : 0;
+      const clientCount = state.clients ? state.clients.length : 0;
+      if (prodCount > 0) {
+        route.textContent = `${vCode ? 'Vendedor ' + vCode + ' • ' : ''}${prodCount} prod. en caché local • ${clientCount} clientes`;
       } else {
-        route.textContent = "Sin ruta guardada en caché local";
+        const cached = getVendorCache(vCode);
+        if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
+          route.textContent = `${vCode ? 'Vendedor ' + vCode + ' • ' : ''}${cached.products.length} prod. en caché local`;
+        } else {
+          route.textContent = "Sin ruta guardada en caché local";
+        }
       }
     } catch (e) {
       route.textContent = "—";
@@ -1969,9 +2055,10 @@ function configMsg(text, ok) {
   if (!st) return;
   st.textContent = text;
   st.className = ok ? "pv-status is-ok" : "pv-status is-error";
+  st.classList.remove('hidden');
 }
 
-function saveSheetsUrl() {
+async function saveSheetsUrl() {
   const url = (document.getElementById('config-sheets-url')?.value || "").trim();
   if (!url) { configMsg("Pega la URL del sistema.", false); return; }
   state.sheetsUrl = url;
@@ -1982,29 +2069,48 @@ function saveSheetsUrl() {
   if (wrap) wrap.classList.add('hidden');
   const err = document.getElementById('login-error');
   if (err && err.textContent.includes('URL')) err.classList.add('hidden');
-  configMsg("Dirección guardada en este equipo.", true);
-  setTimeout(() => {
-    closeConfigModal();
-  }, 600);
 
-  // Sincroniza automáticamente ÚNICAMENTE cuando el link se guarde (requisito específico):
-  if (state.vendedor && state.vendedor.codigo && navigator.onLine) {
-    showSyncBox("Estamos actualizando", "Actualizando catálogo con la nueva dirección…", true);
-    const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
-    downloadVendorCatalog(state.vendedor.codigo, (t) => {
-      showSyncBox("Estamos actualizando", `Descargando ${names[t] || t}...`, true);
-    }).then(async (cat) => {
-      applyVendorCatalog(cat);
+  configMsg("Dirección guardada. Sincronizando catálogo con el sistema...", true);
+
+  // Sincroniza automáticamente de inmediato al guardar la URL (con o sin sesión activa)
+  if (navigator.onLine) {
+    showSyncBox("Estamos actualizando", "Sincronizando catálogo con la nueva dirección…", true);
+    try {
+      const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
+      if (state.vendedor && state.vendedor.codigo) {
+        const cat = await downloadVendorCatalog(state.vendedor.codigo, (t) => {
+          showSyncBox("Estamos actualizando", `Descargando ${names[t] || t}...`, true);
+        });
+        applyVendorCatalog(cat);
+      } else {
+        await syncAllVendorsFromSheets((t) => {
+          showSyncBox("Estamos actualizando", `Descargando ${names[t] || t}...`, true);
+        });
+      }
       await loadMaestros();
-      showSyncBox("¡Catálogo al día!", "Datos actualizados y guardados en tu equipo.", false);
-      hideSyncBox(2200);
-    }).catch((e) => {
+
+      // Actualizar información visual en el modal
+      const route = document.getElementById('config-route-info');
+      if (route) {
+        route.textContent = `Catálogo guardado • ${state.products.length} prod. • ${state.clients.length} clientes`;
+      }
+      configMsg("¡Sincronización completa y guardada en este equipo!", true);
+      showSyncBox("¡Catálogo sincronizado!", `${state.products.length} productos guardados en tu equipo.`, false);
+      hideSyncBox(2500);
+      setTimeout(() => {
+        closeConfigModal();
+      }, 1000);
+    } catch (e) {
       console.warn("sync tras guardar link:", e);
-      showSyncBox("Sin conexión", "No se pudo sincronizar. Tus datos guardados siguen activos.", false);
+      configMsg(`Error al sincronizar: ${e.message}`, false);
+      showSyncBox("Aviso", "No se pudo sincronizar con la URL indicada.", false);
       hideSyncBox(3000);
-    });
+    }
   } else {
-    loadMaestros();
+    configMsg("Dirección guardada. Sin conexión para sincronizar ahora.", true);
+    setTimeout(() => {
+      closeConfigModal();
+    }, 1200);
   }
 }
 
@@ -2018,7 +2124,7 @@ async function testSheetsConnection() {
     if (json.status === "success") {
       configMsg("Conexión correcta con el Sheet.", true);
     } else {
-      throw new Error(json.message || "Respuesta inválida");
+      throw new Error((json && json.message) || "Respuesta inválida");
     }
   } catch (e) {
     configMsg(`Sin conexión: ${e.message}`, false);
