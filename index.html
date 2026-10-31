@@ -17,7 +17,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-  <link rel="stylesheet" href="styles.css?v=6.1">
+  <link rel="stylesheet" href="styles.css?v=6.3">
 </head>
 <body>
 
@@ -207,12 +207,18 @@
         <p id="login-route-error" class="hidden pv-error" role="alert"></p>
         <button type="button" onclick="confirmDownloadRoute()" id="btn-download-route" class="pv-btn pv-btn-primary pv-btn-block">
           <i class="fa-solid fa-cloud-arrow-down" aria-hidden="true"></i>
-          <span>Sí, actualizar mi ruta</span>
+          <span>Descargar datos</span>
         </button>
-        <button type="button" onclick="useCachedRoute()" id="btn-offline-route" class="pv-btn pv-btn-secondary pv-btn-block">
-          <i class="fa-solid fa-box-archive" aria-hidden="true"></i>
-          <span>No, usar datos guardados</span>
+        <button type="button" onclick="useCachedRoute()" id="btn-offline-route" class="pv-btn pv-btn-secondary pv-btn-block" style="margin-top:8px;">
+          <i class="fa-solid fa-database" aria-hidden="true"></i>
+          <span>Usar con datos actuales</span>
         </button>
+        <div style="text-align:center;margin-top:10px;">
+          <button type="button" onclick="resetLoginSteps()" class="pv-link-sm" style="background:none;border:none;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;">
+            <i class="fa-solid fa-arrow-left"></i>
+            <span>Cambiar de vendedor</span>
+          </button>
+        </div>
       </div>
 
       <p class="pv-login-note">El primer ingreso guarda tus credenciales en este equipo. Después funciona 100% sin conexión con tu catálogo en caché.</p>
@@ -377,7 +383,7 @@
   </div>
 
   <script src="html5-qrcode.min.js"></script>
-  <script src="bundle_data.js?v=6.1"></script>
-  <script src="app.js?v=6.1"></script>
+  <script src="bundle_data.js?v=6.3"></script>
+  <script src="app.js?v=6.3"></script>
 </body>
 </html>

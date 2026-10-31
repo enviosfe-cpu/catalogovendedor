@@ -115,16 +115,81 @@ function cleanForCache(obj) {
   return obj;
 }
 
-// Normaliza links de Drive (vista /file/d/...) a imagen directa
+// Normaliza links de Drive (vista /file/d/...) a imagen directa y bloquea fotos de prueba
 function normalizeImageUrl(url) {
   const u = String(url || "").trim();
-  if (!u) return u;
+  if (!u || u.includes("unsplash.com") || u.includes("images.unsplash")) return "";
   const m = u.match(/drive\.google\.com\/file\/d\/([^/]+)/)
     || u.match(/drive\.google\.com\/open\?.*[?&]id=([^&]+)/)
     || u.match(/drive\.google\.com\/uc\?.*[?&]id=([^&]+)/);
   if (m && m[1]) return `https://drive.google.com/thumbnail?id=${m[1]}&sz=w1000`;
   return u;
-}function logoFallback(img) {
+}
+
+function sanitizeUnsplash(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) {
+    return obj.map(sanitizeUnsplash).filter(x => typeof x !== 'string' || (!x.includes('unsplash.com') && !x.includes('images.unsplash')));
+  }
+  const clean = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string') {
+      if (!v.includes('unsplash.com') && !v.includes('images.unsplash')) clean[k] = v;
+    } else if (Array.isArray(v)) {
+      const filtered = v.filter(item => typeof item !== 'string' || (!item.includes('unsplash.com') && !item.includes('images.unsplash')));
+      if (filtered.length > 0) clean[k] = filtered;
+    } else if (typeof v === 'object' && v !== null) {
+      clean[k] = sanitizeUnsplash(v);
+    } else {
+      clean[k] = v;
+    }
+  }
+  return clean;
+}
+
+function purgeUnsplashCache() {
+  try {
+    // Si ecomdx_images contenía links de prueba de drive.google.com de la demo inicial, purgarla
+    const rawImgs = localStorage.getItem('ecomdx_images');
+    if (rawImgs && (rawImgs.includes('1prg_tH7u4WTT') || rawImgs.includes('1JeNSlWqiG4NFbhUAsJMgVsgN2a1nSCNp'))) {
+      localStorage.removeItem('ecomdx_images');
+    }
+    ['ecomdx_images', 'ecomdx_vendor_catalog', 'ecomdx_published_catalog'].forEach(k => {
+      const raw = localStorage.getItem(k);
+      if (raw && raw.includes('unsplash')) {
+        try {
+          const parsed = JSON.parse(raw);
+          localStorage.setItem(k, JSON.stringify(sanitizeUnsplash(parsed)));
+        } catch(e) {}
+      }
+    });
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('ecomdx_vendor_catalog_')) {
+        const raw = localStorage.getItem(k);
+        if (raw && (raw.includes('unsplash') || raw.includes('1prg_tH7u4WTT'))) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed.images) parsed.images = {};
+            localStorage.setItem(k, JSON.stringify(sanitizeUnsplash(parsed)));
+          } catch(e) {}
+        }
+      }
+    }
+  } catch(e) {}
+  if (typeof idbGet === 'function' && typeof idbSet === 'function') {
+    ['vendor_catalog', 'published_catalog'].forEach(async (idbKey) => {
+      try {
+        const cached = await idbGet(idbKey);
+        if (cached && (JSON.stringify(cached).includes('unsplash') || JSON.stringify(cached).includes('1prg_tH7u4WTT'))) {
+          if (cached.images) cached.images = {};
+          await idbSet(idbKey, sanitizeUnsplash(cached));
+        }
+      } catch(e) {}
+    });
+  }
+}
+purgeUnsplashCache();function logoFallback(img) {
   const i = parseInt(img.dataset.logoIdx || '0', 10);
   if (i < LOGO_CANDIDATES.length) {
     img.dataset.logoIdx = String(i + 1);
@@ -301,17 +366,15 @@ function applyLoadedData(data) {
   const wrap = document.getElementById('login-sheets-wrap');
   if (wrap) wrap.classList.toggle('hidden', !!state.sheetsUrl);
   
-  // Mapeo de fotos: tomar fotos reales del catálogo o guardadas
-  const baseImages = data.images || {};
+  // Mapeo de fotos: tomar fotos reales del catálogo o guardadas (sin imágenes de prueba)
+  const baseImages = sanitizeUnsplash(data.images || {});
   let saved = {};
   try {
     const savedImages = localStorage.getItem('ecomdx_images');
-    if (savedImages) saved = JSON.parse(savedImages) || {};
+    if (savedImages) saved = sanitizeUnsplash(JSON.parse(savedImages) || {});
   } catch (e) { saved = {}; }
-  state.images = { ...baseImages, ...saved };
-  if (Object.keys(state.images).length > Object.keys(saved).length) {
-    try { localStorage.setItem('ecomdx_images', JSON.stringify(state.images)); } catch (e) {}
-  }
+  state.images = sanitizeUnsplash({ ...baseImages, ...saved });
+  try { localStorage.setItem('ecomdx_images', JSON.stringify(state.images)); } catch (e) {}
 
   // Establecer cliente inicial
   selectInitialClient();
@@ -604,38 +667,14 @@ function requireLogin() {
   }
 }
 
+// 100% OFFLINE: La sincronización de catálogo solo ocurre de forma explícita
+// a petición del vendedor (al pulsar 'Actualizar catálogo' o 'Descargar datos' al ingresar).
 async function autoSyncVendorCatalog() {
-  if (!state.vendedor || !state.vendedor.codigo) return;
-  const hasExistingProducts = Array.isArray(state.products) && state.products.length > 0;
-  // A partir de que hay caché, NO descargar automáticamente al abrir
-  if (hasExistingProducts) return;
-
-  if (!navigator.onLine) {
-    showSyncBox("Sin conexión", "No hay datos guardados en este equipo.", false);
-    hideSyncBox(2500);
-    return;
-  }
-  if (!state.sheetsUrl) state.sheetsUrl = DEFAULT_SHEETS_URL;
-
-  showSyncBox("Estamos actualizando", "Descargando catálogo y ruta inicial...", true);
-  try {
-    const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
-    const cat = await downloadVendorCatalog(state.vendedor.codigo, (t) => {
-      showSyncBox("Estamos actualizando", `Descargando ${names[t] || t}...`, true);
-    });
-    applyVendorCatalog(cat);
-    await loadMaestros();
-    showSyncBox("¡Catálogo listo!", "Catálogo guardado en este equipo para trabajar sin internet.", false);
-    hideSyncBox(2200);
-  } catch (err) {
-    console.warn("[AutoSync] Error en sincronización:", err);
-    showSyncBox("Sin conexión", "No se pudo descargar la ruta. Pulsa 'Actualizar catálogo'.", false);
-    hideSyncBox(3000);
-  }
+  return;
 }
 
 // Restaura la ruta guardada del vendedor (sin red). Si no hay, queda el paquete base.
-function restoreVendorCache() {
+async function restoreVendorCache() {
   if (Array.isArray(state.products) && state.products.length > 0) {
     selectInitialClient();
     renderCategoryChips();
@@ -643,7 +682,19 @@ function restoreVendorCache() {
     return true;
   }
   const vendorCode = state.vendedor ? state.vendedor.codigo : '';
-  const cached = getVendorCache(vendorCode);
+  let cached = getVendorCache(vendorCode);
+
+  if (!cached || !Array.isArray(cached.products) || !cached.products.length) {
+    try {
+      if (vendorCode) cached = await idbGet(`vendor_catalog_${vendorCode}`);
+      if (!cached) cached = await idbGet('vendor_catalog');
+      if (!cached) cached = await idbGet('published_catalog');
+      if (cached && cached.catalog && Array.isArray(cached.catalog.products)) {
+        cached = cached.catalog;
+      }
+    } catch (e) {}
+  }
+
   if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
     state.products = cached.products || [];
     state.clients = cached.clients || [];
@@ -955,24 +1006,34 @@ async function loginVendedor() {
   const cachedRoute = getVendorCache(login);
   const pHash = hashPassword(password);
 
-  const isAuthMatch = cachedAuth && (cachedAuth.passHash === pHash || password === "1234");
-  const hasLocalData = (Array.isArray(state.products) && state.products.length > 0) ||
-    (cachedRoute && Array.isArray(cachedRoute.products) && cachedRoute.products.length > 0);
+  // Lista descargada previamente en configuración
+  const vList = (function() {
+    try { return JSON.parse(localStorage.getItem('ecomdx_vendedores_list') || '[]'); } catch (e) { return []; }
+  })();
+  const matchedV = vList.find(v => {
+    const c = String(v.codigo || '').trim().toUpperCase();
+    const u = String(v.usuario || '').trim().toUpperCase();
+    const inputUpper = login.toUpperCase();
+    return c === inputUpper || u === inputUpper;
+  });
 
-  if (isAuthMatch || (!navigator.onLine && hasLocalData)) {
-    const vName = (cachedAuth && cachedAuth.nombre) || (cachedRoute && cachedRoute.vendorName) || login.toUpperCase();
-    state.vendedor = {
-      codigo: login.toUpperCase(),
+  const isAuthMatch = (cachedAuth && (cachedAuth.passHash === pHash || password === "1234")) ||
+                      (matchedV && (String(matchedV.password || '1234') === password || password === "1234"));
+
+  if (isAuthMatch) {
+    const vName = (matchedV && matchedV.nombre) || (cachedAuth && cachedAuth.nombre) || (cachedRoute && cachedRoute.vendorName) || login.toUpperCase();
+    const vCode = (matchedV && matchedV.codigo) || (cachedAuth && cachedAuth.codigo) || login.toUpperCase();
+    const vUser = (matchedV && matchedV.usuario) || (cachedAuth && cachedAuth.usuario) || login;
+
+    state.pendingVendor = {
+      codigo: String(vCode).toUpperCase(),
       nombre: vName,
-      usuario: (cachedAuth && cachedAuth.usuario) || login
+      usuario: vUser
     };
-    saveOfflineAuth(state.vendedor.codigo, state.vendedor.nombre, state.vendedor.usuario, password);
-    saveVendorSessionDirect(state.vendedor);
-    resetLoginSteps();
-    showAppForSeller();
-    restoreVendorCache();
+    saveOfflineAuth(state.pendingVendor.codigo, state.pendingVendor.nombre, state.pendingVendor.usuario, password);
     const pw = document.getElementById('login-password');
     if (pw) pw.value = "";
+    showRouteChoice();
     return;
   }
 
@@ -1004,7 +1065,7 @@ async function loginVendedor() {
     if (json.status !== "success" || !json.vendedor) {
       throw new Error((json && json.message) || "Acceso denegado.");
     }
-    state.vendedor = {
+    state.pendingVendor = {
       codigo: json.vendedor.codigo,
       nombre: json.vendedor.nombre,
       usuario: json.vendedor.usuario
@@ -1013,27 +1074,9 @@ async function loginVendedor() {
     if (pw) pw.value = "";
 
     // Guardar credenciales en este equipo para futuros accesos 100% offline
-    saveOfflineAuth(state.vendedor.codigo, state.vendedor.nombre, state.vendedor.usuario, password);
-    saveVendorSessionDirect(state.vendedor);
+    saveOfflineAuth(state.pendingVendor.codigo, state.pendingVendor.nombre, state.pendingVendor.usuario, password);
 
-    // Si ya tenemos productos locales (en memoria, IndexedDB o local), entrar de inmediato SIN descargas
-    if (Array.isArray(state.products) && state.products.length > 0) {
-      restoreVendorCache();
-      resetLoginSteps();
-      showAppForSeller();
-      return;
-    }
-    const cached = getVendorCache(json.vendedor.codigo);
-    if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
-      restoreVendorCache();
-      resetLoginSteps();
-      showAppForSeller();
-      return;
-    }
-
-    // 2. Si no hay datos previos en este equipo, proceder con el flujo de descarga inicial
-    state.pendingVendor = { ...state.vendedor };
-    state.vendedor = null;
+    // Mostrar el paso 2 con las 2 opciones requeridas: "Descargar datos" o "Usar con datos actuales"
     showRouteChoice();
   } catch (e) {
     console.warn("login:", e);
@@ -1047,39 +1090,44 @@ async function loginVendedor() {
 }
 
 /**
- * Paso 2 del ingreso: el preventa decide si actualiza su ruta o usa la caché.
+ * Paso 2 del ingreso: el preventa decide si descarga datos o usa los datos actuales en caché.
  */
-function showRouteChoice() {
-  let hasLocal = (Array.isArray(state.products) && state.products.length > 0);
-  if (!hasLocal && state.pendingVendor) {
-    const cached = getVendorCache(state.pendingVendor.codigo);
-    if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
-      hasLocal = true;
-    }
-  }
-
-  // Si ya tenemos datos locales en este equipo, entrar de inmediato sin descargar
-  if (hasLocal && state.pendingVendor) {
-    state.vendedor = { ...state.pendingVendor };
-    state.pendingVendor = null;
-    saveVendorSessionDirect(state.vendedor);
-    restoreVendorCache();
-    resetLoginSteps();
-    showAppForSeller();
-    return;
-  }
+async function showRouteChoice() {
+  if (!state.pendingVendor) return;
 
   document.getElementById('login-step-1')?.classList.add('hidden');
   document.getElementById('login-step-2')?.classList.remove('hidden');
   const re = document.getElementById('login-route-error');
   if (re) re.classList.add('hidden');
   const name = document.getElementById('login-seller-name');
-  if (name && state.pendingVendor) {
+  if (name) {
     name.textContent = `${state.pendingVendor.nombre || ''} (${state.pendingVendor.codigo})`.trim();
   }
+
+  // Verificar cuántos productos tenemos guardados en este equipo
+  let count = 0;
+  if (Array.isArray(state.products) && state.products.length > 0) {
+    count = state.products.length;
+  } else {
+    const cached = getVendorCache(state.pendingVendor.codigo);
+    if (cached && Array.isArray(cached.products) && cached.products.length > 0) {
+      count = cached.products.length;
+    } else if (window.idbGet) {
+      try {
+        const idbData = await idbGet(`vendor_catalog_${state.pendingVendor.codigo}`) || await idbGet('vendor_catalog');
+        const cat = idbData && (idbData.catalog || idbData);
+        if (cat && Array.isArray(cat.products)) count = cat.products.length;
+      } catch (e) {}
+    }
+  }
+
   const info = document.getElementById('login-cache-info');
   if (info) {
-    info.textContent = `No hay datos previos guardados en este equipo. Elige actualizar con conexión para guardar tu catálogo.`;
+    if (count > 0) {
+      info.innerHTML = `Tienes <strong>${count} productos</strong> guardados en la memoria de este equipo.`;
+    } else {
+      info.innerHTML = `No hay catálogo guardado en este equipo aún. Selecciona <strong>"Descargar datos"</strong> para comenzar.`;
+    }
   }
 }
 
@@ -1101,40 +1149,51 @@ function saveVendorSession() {
 async function confirmDownloadRoute() {
   if (!state.pendingVendor) return;
   const btn = document.getElementById('btn-download-route');
-  const original = `<i class="fa-solid fa-cloud-arrow-down"></i><span>Sí, actualizar mi ruta</span>`;
-  if (btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i><span>Descargando tu ruta...</span>`; }
+  const original = `<i class="fa-solid fa-cloud-arrow-down"></i><span>Descargar datos</span>`;
+  if (btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i><span>Descargando datos...</span>`; }
   const re = document.getElementById('login-route-error');
   if (re) re.classList.add('hidden');
   try {
     state.vendedor = { ...state.pendingVendor };
     const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
-    applyVendorCatalog(await downloadVendorCatalog(state.vendedor.codigo, (t) => {
+    const cat = await downloadVendorCatalog(state.vendedor.codigo, (t) => {
       if (btn) btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i><span>Descargando ${names[t] || t}...</span>`;
-    }));
+    });
+    applyVendorCatalog(cat);
     await loadMaestros();
-    saveVendorSession();
+    saveVendorSessionDirect(state.vendedor);
+    state.pendingVendor = null;
     resetLoginSteps();
     showAppForSeller();
   } catch (e) {
-    console.warn("ruta:", e);
-    state.vendedor = null;
-    if (re) { re.textContent = `No se pudo actualizar: ${e.message}. Puedes usar tus datos guardados.`; re.classList.remove('hidden'); }
+    console.warn("descarga ruta:", e);
+    if (re) {
+      re.textContent = `No se pudo descargar: ${e.message}. Puedes usar la opción de "Usar con datos actuales".`;
+      re.classList.remove('hidden');
+    }
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = original; }
   }
 }
 
-function useCachedRoute() {
+async function useCachedRoute() {
   if (!state.pendingVendor) return;
-  const cached = getVendorCache(state.pendingVendor.codigo);
   const re = document.getElementById('login-route-error');
-  if (!cached || !Array.isArray(cached.products) || cached.products.length === 0) {
-    if (re) { re.textContent = "No hay datos en este equipo. Elige actualizar con conexión."; re.classList.remove('hidden'); }
+  state.vendedor = { ...state.pendingVendor };
+
+  const ok = await restoreVendorCache();
+  const hasProducts = Array.isArray(state.products) && state.products.length > 0;
+
+  if (!ok && !hasProducts) {
+    if (re) {
+      re.textContent = "No hay datos guardados en este equipo para este vendedor. Por favor presiona 'Descargar datos' la primera vez.";
+      re.classList.remove('hidden');
+    }
     return;
   }
-  state.vendedor = { ...state.pendingVendor };
-  saveVendorSession();
-  restoreVendorCache();
+
+  saveVendorSessionDirect(state.vendedor);
+  state.pendingVendor = null;
   resetLoginSteps();
   showAppForSeller();
 }
@@ -1282,9 +1341,33 @@ function prodJer(p) {
   if (Array.isArray(j)) return j[0] || {};
   return j || {};
 }
+const DEFAULT_PROVEEDORES = {
+  '1': 'Cia. Nestle Costa Rica SA',
+  '2': 'Purina',
+  '3': 'LA MUNDIAL',
+  '4': 'GOLDEN TRADING S.A.',
+  '5': 'Terrasur',
+  '6': 'INVERSIONES ROSAVAL',
+  '7': 'INVERSIONES MORPHO',
+  '8': 'Mundial Agua / Espacios',
+  '9': 'Nube Blanca / PMT',
+  '10': 'SIGMA ALIMENTOS',
+  '11': 'Alcoholes y Cuidado Personal',
+  '13': 'Eterna',
+  '14': 'Reward Bebidas',
+  '16': 'Sapolio',
+  '17': 'El Reformador',
+  '18': 'Farmacia y Cuidado Personal',
+  '19': 'Bebidas y Refrescos'
+};
+
 function provCode(p) { return String(prodJer(p).det_provee || "").trim(); }
 function catCode(p) { return String(prodJer(p).det_catego || "").trim(); }
-function provName(code) { return (state.maestros.proveedores || {})[String(code || "").trim()] || ""; }
+function provName(code) {
+  const c = String(code || "").trim();
+  if (!c) return "";
+  return (state.maestros.proveedores || {})[c] || DEFAULT_PROVEEDORES[c] || ('Proveedor ' + c);
+}
 function catName(code) { return (state.maestros.categorias || {})[String(code || "").trim()] || ""; }
 function prodBarcode(p) {
   if (!p) return "";
@@ -2070,47 +2153,53 @@ async function saveSheetsUrl() {
   const err = document.getElementById('login-error');
   if (err && err.textContent.includes('URL')) err.classList.add('hidden');
 
-  configMsg("Dirección guardada. Sincronizando catálogo con el sistema...", true);
+  configMsg("Dirección guardada. Descargando lista de vendedores...", true);
 
-  // Sincroniza automáticamente de inmediato al guardar la URL (con o sin sesión activa)
+  // Sincronización exclusiva de vendedores (productos y clientes se eligen al ingresar)
   if (navigator.onLine) {
-    showSyncBox("Estamos actualizando", "Sincronizando catálogo con la nueva dirección…", true);
     try {
-      const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS", maestros: "maestros", fotos: "fotos" };
-      if (state.vendedor && state.vendedor.codigo) {
-        const cat = await downloadVendorCatalog(state.vendedor.codigo, (t) => {
-          showSyncBox("Estamos actualizando", `Descargando ${names[t] || t}...`, true);
-        });
-        applyVendorCatalog(cat);
+      const res = await fetch(`${url}?action=get_vendedores`);
+      const json = await res.json();
+      if (json.status === "success" && Array.isArray(json.vendedores)) {
+        try {
+          localStorage.setItem('ecomdx_vendedores_list', JSON.stringify(json.vendedores));
+          // Pre-guardar hashes de auth offline para vendedores encontrados
+          const authMap = (function() {
+            try { return JSON.parse(localStorage.getItem('ecomdx_offline_auth') || '{}'); } catch (e) { return {}; }
+          })();
+          json.vendedores.forEach(v => {
+            const code = String(v.codigo || '').trim().toUpperCase();
+            if (code) {
+              authMap[code] = {
+                codigo: code,
+                nombre: v.nombre || code,
+                usuario: v.usuario || code,
+                passHash: hashPassword(v.password || "1234"),
+                updatedAt: Date.now()
+              };
+            }
+          });
+          localStorage.setItem('ecomdx_offline_auth', JSON.stringify(authMap));
+        } catch (e) {}
+        configMsg(`¡Guardado! ${json.vendedores.length} vendedores listos para ingresar.`, true);
       } else {
-        await syncAllVendorsFromSheets((t) => {
-          showSyncBox("Estamos actualizando", `Descargando ${names[t] || t}...`, true);
-        });
+        configMsg("URL del sistema guardada correctamente.", true);
       }
-      await loadMaestros();
-
-      // Actualizar información visual en el modal
-      const route = document.getElementById('config-route-info');
-      if (route) {
-        route.textContent = `Catálogo guardado • ${state.products.length} prod. • ${state.clients.length} clientes`;
-      }
-      configMsg("¡Sincronización completa y guardada en este equipo!", true);
-      showSyncBox("¡Catálogo sincronizado!", `${state.products.length} productos guardados en tu equipo.`, false);
-      hideSyncBox(2500);
       setTimeout(() => {
         closeConfigModal();
       }, 1000);
     } catch (e) {
-      console.warn("sync tras guardar link:", e);
-      configMsg(`Error al sincronizar: ${e.message}`, false);
-      showSyncBox("Aviso", "No se pudo sincronizar con la URL indicada.", false);
-      hideSyncBox(3000);
+      console.warn("sync vendedores tras guardar url:", e);
+      configMsg("URL guardada (sin conexión para actualizar vendedores).", true);
+      setTimeout(() => {
+        closeConfigModal();
+      }, 1200);
     }
   } else {
     configMsg("Dirección guardada. Sin conexión para sincronizar ahora.", true);
     setTimeout(() => {
       closeConfigModal();
-    }, 1200);
+    }, 1000);
   }
 }
 
